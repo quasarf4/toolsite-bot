@@ -9,9 +9,13 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 dp = Dispatcher()
-pending_add = set()
-
+# Temporary conversation states. Persistent business data is stored in SQLite.
+pending = {}
 DB_PATH = os.getenv("DB_PATH", "/data/toolsite.db")
+
+
+def now_text():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def db_connect():
@@ -26,6 +30,25 @@ def db_connect():
             status TEXT NOT NULL DEFAULT 'free',
             holder_id INTEGER,
             holder_name TEXT,
+            floor TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_id INTEGER NOT NULL,
+            tool_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
             floor TEXT,
             created_at TEXT NOT NULL
         )
@@ -49,54 +72,136 @@ def tools_menu():
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="➕ Добавить инструмент", callback_data="tool_add")
     keyboard.button(text="📋 Показать список", callback_data="tool_list")
+    keyboard.button(text="📤 Выдать инструмент", callback_data="tool_issue")
     keyboard.button(text="⬅️ Главное меню", callback_data="home")
     keyboard.adjust(1)
     return keyboard.as_markup()
 
 
+def users_menu():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="➕ Зарегистрироваться / изменить имя", callback_data="user_register")
+    keyboard.button(text="👷 Список сотрудников", callback_data="user_list")
+    keyboard.button(text="⬅️ Главное меню", callback_data="home")
+    keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
+def get_user(telegram_id):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT name FROM users WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
-    pending_add.discard(message.from_user.id)
-    await message.answer(
-        "🏗 Добро пожаловать в ToolSite!\n\n"
-        "Система учёта строительных инструментов.\n\n"
-        "Выбери нужный раздел:",
-        reply_markup=main_menu()
-    )
+    pending.pop(message.from_user.id, None)
+    user = get_user(message.from_user.id)
+    greeting = "🏗 Добро пожаловать в ToolSite!\n\nСистема учёта строительных инструментов.\n"
+    if user:
+        greeting += f"\nТы вошёл как: {user[0]}."
+    else:
+        greeting += "\nСначала открой раздел «Пользователи» и зарегистрируй своё имя."
+    await message.answer(greeting + "\n\nВыбери нужный раздел:", reply_markup=main_menu())
 
 
 @dp.message(Command("cancel"))
-async def cancel_add(message: Message):
-    pending_add.discard(message.from_user.id)
-    await message.answer("Добавление отменено.", reply_markup=main_menu())
+async def cancel_action(message: Message):
+    pending.pop(message.from_user.id, None)
+    await message.answer("Действие отменено.", reply_markup=main_menu())
 
 
 @dp.message(F.text)
-async def receive_tool_name(message: Message):
+async def receive_text(message: Message):
     user_id = message.from_user.id
-    if user_id not in pending_add:
+    state = pending.get(user_id)
+    if not state:
         return
 
-    name = message.text.strip()
-    if not name or name.startswith("/"):
-        await message.answer("Напиши название инструмента обычным текстом или отправь /cancel для отмены.")
+    value = message.text.strip()
+    if value.startswith("/"):
+        await message.answer("Отправь обычный текст или /cancel для отмены.")
         return
-    if len(name) > 100:
-        await message.answer("Название слишком длинное. Максимум 100 символов. Попробуй ещё раз.")
+    if not value:
+        await message.answer("Поле не должно быть пустым. Попробуй ещё раз.")
         return
 
-    with db_connect() as conn:
-        cursor = conn.execute(
-            "INSERT INTO tools (name, created_at) VALUES (?, ?)",
-            (name, datetime.now().astimezone().isoformat(timespec="seconds"))
+    if state["action"] == "add_tool":
+        if len(value) > 100:
+            await message.answer("Название слишком длинное. Максимум 100 символов.")
+            return
+        with db_connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO tools (name, created_at) VALUES (?, ?)",
+                (value, now_text())
+            )
+            tool_id = cur.lastrowid
+        pending.pop(user_id, None)
+        await message.answer(
+            f"✅ Инструмент добавлен!\n№{tool_id}: {value}\nСтатус: Свободен",
+            reply_markup=tools_menu()
         )
-        tool_id = cursor.lastrowid
+        return
 
-    pending_add.discard(user_id)
-    await message.answer(
-        f"✅ Инструмент добавлен!\n\n№{tool_id}: {name}\nСтатус: Свободен",
-        reply_markup=tools_menu()
-    )
+    if state["action"] == "register":
+        if len(value) > 60:
+            await message.answer("Имя слишком длинное. Максимум 60 символов.")
+            return
+        with db_connect() as conn:
+            conn.execute(
+                """INSERT INTO users (telegram_id, name, created_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(telegram_id) DO UPDATE SET name = excluded.name""",
+                (user_id, value, now_text())
+            )
+        pending.pop(user_id, None)
+        await message.answer(f"✅ Ты зарегистрирован в ToolSite под именем: {value}", reply_markup=main_menu())
+        return
+
+    if state["action"] == "issue_floor":
+        if len(value) > 40:
+            await message.answer("Название этажа слишком длинное. Максимум 40 символов.")
+            return
+        tool_id = state["tool_id"]
+        user = get_user(user_id)
+        if not user:
+            pending.pop(user_id, None)
+            await message.answer("Сначала зарегистрируйся в разделе «Пользователи».", reply_markup=users_menu())
+            return
+        with db_connect() as conn:
+            tool = conn.execute(
+                "SELECT name, status FROM tools WHERE id = ?", (tool_id,)
+            ).fetchone()
+            if not tool:
+                pending.pop(user_id, None)
+                await message.answer("Инструмент не найден. Обнови список.")
+                return
+            if tool[1] != "free":
+                pending.pop(user_id, None)
+                await message.answer("Этот инструмент уже выдан другому сотруднику.")
+                return
+            changed = conn.execute(
+                """UPDATE tools SET status = 'issued', holder_id = ?, holder_name = ?, floor = ?
+                   WHERE id = ? AND status = 'free'""",
+                (user_id, user[0], value, tool_id)
+            ).rowcount
+            if changed:
+                conn.execute(
+                    """INSERT INTO journal
+                       (tool_id, tool_name, action, user_id, user_name, floor, created_at)
+                       VALUES (?, ?, 'Выдача', ?, ?, ?, ?)""",
+                    (tool_id, tool[0], user_id, user[0], value, now_text())
+                )
+        pending.pop(user_id, None)
+        if changed:
+            await message.answer(
+                f"✅ Инструмент выдан!\n\n№{tool_id}: {tool[0]}\nСотрудник: {user[0]}\nЭтаж: {value}",
+                reply_markup=main_menu()
+            )
+        else:
+            await message.answer("Не удалось выдать инструмент: возможно, его уже забрали.")
+        return
 
 
 @dp.callback_query(F.data == "home")
@@ -110,20 +215,14 @@ async def open_tools(callback: CallbackQuery):
     await callback.answer()
     with db_connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM tools").fetchone()[0]
-    await callback.message.answer(
-        f"🔧 Раздел инструментов\nВсего в базе: {total}",
-        reply_markup=tools_menu()
-    )
+    await callback.message.answer(f"🔧 Раздел инструментов\nВсего в базе: {total}", reply_markup=tools_menu())
 
 
 @dp.callback_query(F.data == "tool_add")
 async def add_tool_start(callback: CallbackQuery):
-    pending_add.add(callback.from_user.id)
+    pending[callback.from_user.id] = {"action": "add_tool"}
     await callback.answer()
-    await callback.message.answer(
-        "➕ Напиши название инструмента.\nНапример: Перфоратор Bosch GBH 2-26.\n\n"
-        "Для отмены отправь /cancel."
-    )
+    await callback.message.answer("➕ Напиши название инструмента.\nНапример: Перфоратор Bosch GBH 2-26.\nДля отмены отправь /cancel.")
 
 
 @dp.callback_query(F.data == "tool_list")
@@ -133,22 +232,56 @@ async def show_tools(callback: CallbackQuery):
         rows = conn.execute(
             "SELECT id, name, status, holder_name, floor FROM tools ORDER BY id DESC"
         ).fetchall()
-
     if not rows:
         text = "📋 Список пока пуст. Нажми «Добавить инструмент», чтобы внести первое оборудование."
     else:
-        lines = ["📋 **Список инструментов:**", ""]
+        lines = ["📋 Список инструментов:", ""]
         for tool_id, name, status, holder_name, floor in rows:
-            if status == "free":
-                state = "🟢 Свободен"
-            else:
-                state = f"🔴 Выдан: {holder_name or 'сотрудник не указан'}"
+            state = "🟢 Свободен" if status == "free" else f"🔴 Выдан: {holder_name or 'сотрудник не указан'}"
             if floor:
                 state += f" · этаж: {floor}"
             lines.append(f"№{tool_id} — {name}\n{state}")
         text = "\n\n".join(lines)
+    await callback.message.answer(text, reply_markup=tools_menu())
 
-    await callback.message.answer(text, reply_markup=tools_menu(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "tool_issue")
+async def issue_tool_start(callback: CallbackQuery):
+    await callback.answer()
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.message.answer("Чтобы выдать инструмент, сначала зарегистрируй своё имя.", reply_markup=users_menu())
+        return
+    with db_connect() as conn:
+        rows = conn.execute("SELECT id, name FROM tools WHERE status = 'free' ORDER BY name").fetchall()
+    if not rows:
+        await callback.message.answer("Сейчас нет свободных инструментов.", reply_markup=tools_menu())
+        return
+    keyboard = InlineKeyboardBuilder()
+    for tool_id, name in rows:
+        keyboard.button(text=f"№{tool_id} — {name}", callback_data=f"issue:{tool_id}")
+    keyboard.button(text="⬅️ Назад", callback_data="tools")
+    keyboard.adjust(1)
+    await callback.message.answer("Выбери инструмент для выдачи:", reply_markup=keyboard.as_markup())
+
+
+@dp.callback_query(F.data.startswith("issue:"))
+async def select_tool_to_issue(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        tool_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.message.answer("Некорректный номер инструмента.")
+        return
+    with db_connect() as conn:
+        tool = conn.execute("SELECT name, status FROM tools WHERE id = ?", (tool_id,)).fetchone()
+    if not tool or tool[1] != "free":
+        await callback.message.answer("Этот инструмент уже недоступен. Обнови список.")
+        return
+    pending[callback.from_user.id] = {"action": "issue_floor", "tool_id": tool_id}
+    await callback.message.answer(
+        f"Выбран: {tool[0]}\n\nНапиши этаж или зону, например: 2 этаж или Подвал.\nДля отмены /cancel."
+    )
 
 
 @dp.callback_query(F.data == "my_tools")
@@ -159,35 +292,107 @@ async def my_tools(callback: CallbackQuery):
             "SELECT id, name, floor FROM tools WHERE holder_id = ? ORDER BY id",
             (callback.from_user.id,)
         ).fetchall()
-    if rows:
-        lines = [f"№{tool_id} — {name}" + (f" · этаж: {floor}" if floor else "")
-                 for tool_id, name, floor in rows]
-        text = "📋 Твои инструменты:\n\n" + "\n".join(lines)
+    if not rows:
+        await callback.message.answer("📋 Сейчас за тобой не закреплено ни одного инструмента.", reply_markup=main_menu())
+        return
+    for tool_id, name, floor in rows:
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="↩️ Вернуть инструмент", callback_data=f"return:{tool_id}")
+        await callback.message.answer(
+            f"№{tool_id} — {name}" + (f"\nЭтаж: {floor}" if floor else ""),
+            reply_markup=keyboard.as_markup()
+        )
+
+
+@dp.callback_query(F.data.startswith("return:"))
+async def return_tool(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        tool_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.message.answer("Некорректный номер инструмента.")
+        return
+    user = get_user(callback.from_user.id)
+    with db_connect() as conn:
+        tool = conn.execute(
+            "SELECT name, floor FROM tools WHERE id = ? AND holder_id = ? AND status = 'issued'",
+            (tool_id, callback.from_user.id)
+        ).fetchone()
+        if not tool:
+            await callback.message.answer("Этот инструмент не закреплён за тобой.")
+            return
+        conn.execute(
+            "UPDATE tools SET status = 'free', holder_id = NULL, holder_name = NULL, floor = NULL WHERE id = ?",
+            (tool_id,)
+        )
+        conn.execute(
+            """INSERT INTO journal
+               (tool_id, tool_name, action, user_id, user_name, floor, created_at)
+               VALUES (?, ?, 'Возврат', ?, ?, ?, ?)""",
+            (tool_id, tool[0], callback.from_user.id, user[0] if user else "Неизвестен", tool[1], now_text())
+        )
+    await callback.message.answer(f"✅ Возврат принят.\n№{tool_id}: {tool[0]} теперь свободен.", reply_markup=main_menu())
+
+
+@dp.callback_query(F.data == "users")
+async def open_users(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("👷 Раздел сотрудников:", reply_markup=users_menu())
+
+
+@dp.callback_query(F.data == "user_register")
+async def register_start(callback: CallbackQuery):
+    pending[callback.from_user.id] = {"action": "register"}
+    await callback.answer()
+    await callback.message.answer("Напиши своё имя и фамилию, например: Иван Петров.\nДля отмены отправь /cancel.")
+
+
+@dp.callback_query(F.data == "user_list")
+async def user_list(callback: CallbackQuery):
+    await callback.answer()
+    with db_connect() as conn:
+        rows = conn.execute("SELECT name FROM users ORDER BY name COLLATE NOCASE").fetchall()
+    if not rows:
+        text = "Сотрудников пока нет. Нажми «Зарегистрироваться»."
     else:
-        text = "📋 Сейчас за тобой не закреплено ни одного инструмента."
+        text = "👷 Зарегистрированные сотрудники:\n\n" + "\n".join(f"• {row[0]}" for row in rows)
+    await callback.message.answer(text, reply_markup=users_menu())
+
+
+@dp.callback_query(F.data == "journal")
+async def show_journal(callback: CallbackQuery):
+    await callback.answer()
+    with db_connect() as conn:
+        rows = conn.execute(
+            """SELECT tool_name, action, user_name, floor, created_at
+               FROM journal ORDER BY id DESC LIMIT 30"""
+        ).fetchall()
+    if not rows:
+        text = "📖 Журнал пока пуст. Записи появятся после первой выдачи или возврата."
+    else:
+        lines = ["📖 Последние операции:", ""]
+        for tool_name, action, user_name, floor, created_at in rows:
+            stamp = created_at.replace("T", " ")[:16]
+            line = f"{action}: {tool_name}\nСотрудник: {user_name}"
+            if floor:
+                line += f" · этаж: {floor}"
+            lines.append(f"{line}\n{stamp}")
+        text = "\n\n".join(lines)
     await callback.message.answer(text, reply_markup=main_menu())
 
 
-@dp.callback_query(F.data.in_({"map", "journal", "users"}))
-async def other_sections(callback: CallbackQuery):
-    messages = {
-        "map": "📍 Карта объекта и этажи — следующий этап разработки.",
-        "journal": "📖 Журнал выдачи и возврата подключим вместе с функцией выдачи.",
-        "users": "👷 Регистрацию сотрудников добавим следующим этапом."
-    }
+@dp.callback_query(F.data == "map")
+async def show_map(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer(messages[callback.data], reply_markup=main_menu())
+    await callback.message.answer("📍 Учёт этажей уже работает при выдаче инструмента. Визуальную карту объекта добавим отдельно.", reply_markup=main_menu())
 
 
 async def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Не задана переменная BOT_TOKEN в настройках Railway Variables")
-
-    # Проверяем доступность базы и создаём таблицу при запуске.
     with db_connect():
         pass
-
     bot = Bot(token=token)
     try:
         await dp.start_polling(bot)
