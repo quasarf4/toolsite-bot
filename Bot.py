@@ -62,14 +62,10 @@ def db_connect():
 
 
 def main_menu():
+    # Keep the Telegram chat clean: the Mini App is the single entry point.
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="🚀 Открыть ToolSite", web_app=WebAppInfo(url=WEBAPP_URL))
-    keyboard.button(text="🔧 Инструменты", callback_data="tools")
-    keyboard.button(text="📍 Карта этажей", callback_data="map")
-    keyboard.button(text="📋 Мои инструменты", callback_data="my_tools")
-    keyboard.button(text="📖 Журнал", callback_data="journal")
-    keyboard.button(text="👷 Пользователи", callback_data="users")
-    keyboard.adjust(1, 2, 2)
+    keyboard.adjust(1)
     return keyboard.as_markup()
 
 
