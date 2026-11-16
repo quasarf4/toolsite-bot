@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 
@@ -7,9 +6,6 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-TOKEN = os.getenv("BOT_TOKEN")
-
-bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
@@ -56,10 +52,17 @@ async def menu_click(callback: CallbackQuery):
 
 
 async def main():
-    if not TOKEN:
-        raise RuntimeError("Не задан BOT_TOKEN")
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "Не задана переменная BOT_TOKEN в настройках Railway Variables"
+        )
 
-    await dp.start_polling(bot)
+    bot = Bot(token=token)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
