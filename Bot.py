@@ -98,12 +98,12 @@ def get_user(telegram_id):
 async def start(message: Message):
     pending.pop(message.from_user.id, None)
     user = get_user(message.from_user.id)
-    greeting = "🏗 Добро пожаловать в ToolSite!\n\nСистема учёта строительных инструментов.\n"
+    greeting = "🏗 TOOLSITE\n━━━━━━━━━━━━━━━━━━\nУЧЁТ ИНСТРУМЕНТОВ"
     if user:
-        greeting += f"\nТы вошёл как: {user[0]}."
+        greeting += f"\n\n👤 Сотрудник: {user[0]}"
     else:
-        greeting += "\nСначала открой раздел «Пользователи» и зарегистрируй своё имя."
-    await message.answer(greeting + "\n\nВыбери нужный раздел:", reply_markup=main_menu())
+        greeting += "\n\n👤 Ты ещё не зарегистрирован.\nОткрой «Сотрудники», чтобы начать."
+    await message.answer(greeting + "\n\nВыбери раздел:", reply_markup=main_menu())
 
 
 @dp.message(Command("cancel"))
@@ -215,7 +215,7 @@ async def open_tools(callback: CallbackQuery):
     await callback.answer()
     with db_connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM tools").fetchone()[0]
-    await callback.message.answer(f"🔧 Раздел инструментов\nВсего в базе: {total}", reply_markup=tools_menu())
+    await callback.message.answer(f"🔧 ИНСТРУМЕНТЫ\n━━━━━━━━━━━━━━━━━━\nВсего в базе: {total}\nДобавляй оборудование, смотри остатки или оформляй выдачу.", reply_markup=tools_menu())
 
 
 @dp.callback_query(F.data == "tool_add")
@@ -235,9 +235,11 @@ async def show_tools(callback: CallbackQuery):
     if not rows:
         text = "📋 Список пока пуст. Нажми «Добавить инструмент», чтобы внести первое оборудование."
     else:
-        lines = ["📋 Список инструментов:", ""]
+        free_count = sum(1 for row in rows if row[2] == "free")
+        issued_count = len(rows) - free_count
+        lines = ["📋 СКЛАД ИНСТРУМЕНТОВ", "━━━━━━━━━━━━━━━━━━", f"Всего: {len(rows)}  ·  🟢 Свободно: {free_count}  ·  🔴 Выдано: {issued_count}", ""]
         for tool_id, name, status, holder_name, floor in rows:
-            state = "🟢 Свободен" if status == "free" else f"🔴 Выдан: {holder_name or 'сотрудник не указан'}"
+            state = "🟢 СВОБОДЕН" if status == "free" else f"🔴 У {holder_name or 'сотрудника'}"
             if floor:
                 state += f" · этаж: {floor}"
             lines.append(f"№{tool_id} — {name}\n{state}")
@@ -475,10 +477,11 @@ async def show_journal(callback: CallbackQuery):
     if not rows:
         text = "📖 Журнал пока пуст. Записи появятся после первой выдачи или возврата."
     else:
-        lines = ["📖 Последние операции:", ""]
+        lines = ["📖 ЖУРНАЛ ОПЕРАЦИЙ", "━━━━━━━━━━━━━━━━━━", "Последние 30 событий", ""]
         for tool_name, action, user_name, floor, created_at in rows:
             stamp = created_at.replace("T", " ")[:16]
-            line = f"{action}: {tool_name}\nСотрудник: {user_name}"
+            icon = "🟢" if action == "Выдача" else ("↩️" if action == "Возврат" else "🔁")
+            line = f"{icon} {action.upper()} · {tool_name}\n👤 {user_name}"
             if floor:
                 line += f" · этаж: {floor}"
             lines.append(f"{line}\n{stamp}")
@@ -502,14 +505,14 @@ async def show_map(callback: CallbackQuery):
     if not rows:
         text = "📍 Карта этажей пока пустая. Когда инструмент выдадут сотруднику с указанием этажа, он появится здесь."
     else:
-        lines = ["📍 Инструменты по этажам:", ""]
+        lines = ["📍 КАРТА ОБЪЕКТА", "━━━━━━━━━━━━━━━━━━", "Расположение выданных инструментов", ""]
         current_floor = None
         for floor_name, tool_name, holder_name in rows:
             if floor_name != current_floor:
                 current_floor = floor_name
                 lines.append(f"🏢 {current_floor}")
             lines.append(f"  • {tool_name} — {holder_name}")
-        text = "\\n".join(lines)
+        text = "\n".join(lines)
 
     await callback.message.answer(text, reply_markup=main_menu())
 
