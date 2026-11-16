@@ -647,7 +647,7 @@ async def api_transfer(request):
 
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth]); app["bot"]=bot
-    app.router.add_get("/",app_index); app.router.add_get("/site-map.jpg",app_map_image); app.router.add_get("/api/state",api_state)
+    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state)
     app.router.add_post("/api/register",api_register); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer)
     runner=web.AppRunner(app); await runner.setup()
