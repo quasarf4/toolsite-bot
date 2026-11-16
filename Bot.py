@@ -8,7 +8,7 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 dp = Dispatcher()
@@ -63,12 +63,13 @@ def db_connect():
 
 def main_menu():
     keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🚀 Открыть ToolSite", web_app=WebAppInfo(url=WEBAPP_URL))
     keyboard.button(text="🔧 Инструменты", callback_data="tools")
     keyboard.button(text="📍 Карта этажей", callback_data="map")
     keyboard.button(text="📋 Мои инструменты", callback_data="my_tools")
     keyboard.button(text="📖 Журнал", callback_data="journal")
     keyboard.button(text="👷 Пользователи", callback_data="users")
-    keyboard.adjust(2, 1, 2)
+    keyboard.adjust(1, 2, 2)
     return keyboard.as_markup()
 
 
@@ -101,15 +102,8 @@ def get_user(telegram_id):
 @dp.message(CommandStart())
 async def start(message: Message):
     pending.pop(message.from_user.id, None)
-    user = get_user(message.from_user.id)
-    greeting = "🏗 TOOLSITE\n━━━━━━━━━━━━━━━━━━\nУЧЁТ ИНСТРУМЕНТОВ"
-    if user:
-        greeting += f"\n\n👤 Сотрудник: {user[0]}"
-    else:
-        greeting += "\n\n👤 Ты ещё не зарегистрирован.\nОткрой «Сотрудники», чтобы начать."
-    await message.answer(greeting + "\n\nОткрой панель ToolSite:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть ToolSite", web_app=WebAppInfo(url=WEBAPP_URL))]]))
-    await message.answer("Или выбери раздел в меню:", reply_markup=main_menu())
-
+    # Telegram requires text for inline keyboards; use an invisible separator.
+    await message.answer("\u2063", reply_markup=main_menu())
 
 @dp.message(Command("cancel"))
 async def cancel_action(message: Message):
@@ -630,6 +624,7 @@ async def main():
     with db_connect():
         pass
     bot = Bot(token=token)
+    await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="ToolSite", web_app=WebAppInfo(url=WEBAPP_URL)))
     runner = await run_web_server(bot)
     try:
         await dp.start_polling(bot)
