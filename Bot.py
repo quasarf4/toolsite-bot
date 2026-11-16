@@ -379,7 +379,7 @@ async def transfer_start(callback: CallbackQuery):
 async def transfer_to_user(callback: CallbackQuery):
     await callback.answer()
     try:
-        _, _, _, tool_id_text, recipient_id_text = callback.data.split(":")
+        _, _, tool_id_text, recipient_id_text = callback.data.split(":")
         tool_id = int(tool_id_text)
         recipient_id = int(recipient_id_text)
     except (ValueError, IndexError):
