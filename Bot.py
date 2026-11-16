@@ -561,7 +561,7 @@ async def app_index(request):
     })
 
 async def app_map_image(request):
-    return web.FileResponse("webapp/site-map.jpg", headers={
+    return web.FileResponse("webapp/Спутниковая карта строительного комплекса.png", headers={
         "Cache-Control": "public, max-age=3600",
     })
 
