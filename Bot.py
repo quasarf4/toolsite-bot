@@ -489,7 +489,29 @@ async def show_journal(callback: CallbackQuery):
 @dp.callback_query(F.data == "map")
 async def show_map(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer("📍 Учёт этажей уже работает при выдаче инструмента. Визуальную карту объекта добавим отдельно.", reply_markup=main_menu())
+    with db_connect() as conn:
+        rows = conn.execute(
+            """SELECT COALESCE(NULLIF(TRIM(floor), ''), 'Этаж не указан') AS floor_name,
+                      name, COALESCE(holder_name, 'Сотрудник не указан')
+               FROM tools
+               WHERE status = 'issued'
+               ORDER BY floor_name COLLATE NOCASE, name COLLATE NOCASE
+               LIMIT 100"""
+        ).fetchall()
+
+    if not rows:
+        text = "📍 Карта этажей пока пустая. Когда инструмент выдадут сотруднику с указанием этажа, он появится здесь."
+    else:
+        lines = ["📍 Инструменты по этажам:", ""]
+        current_floor = None
+        for floor_name, tool_name, holder_name in rows:
+            if floor_name != current_floor:
+                current_floor = floor_name
+                lines.append(f"🏢 {current_floor}")
+            lines.append(f"  • {tool_name} — {holder_name}")
+        text = "\\n".join(lines)
+
+    await callback.message.answer(text, reply_markup=main_menu())
 
 
 async def main():
