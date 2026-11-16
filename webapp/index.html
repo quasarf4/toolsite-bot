@@ -19,6 +19,116 @@
 .siteplan-gate{position:absolute;right:0;bottom:18%;width:15%;height:4px;background:repeating-linear-gradient(90deg,#eee 0 10px,#d94c42 10px 20px);transform:rotate(-5deg);z-index:3;box-shadow:0 0 0 2px #222}
 .siteplan-label{font-size:8px;opacity:.9;display:block;margin-top:4px}
 @media(max-width:380px){.siteplan{min-height:390px}.siteplan-platform{font-size:9px;min-width:48px}.siteplan-zone{font-size:8px;padding:5px}.siteplan-building span{font-size:9px}}
+
+/* Refined site plan: polished architectural/site-management look. */
+.siteplan{
+  isolation:isolate; aspect-ratio:1/1.12; min-height:450px; max-height:650px;
+  border:7px solid #263f31; border-radius:22px;
+  background:
+    radial-gradient(ellipse at 48% 44%,#aab49a 0%,#929d84 54%,#78876f 100%);
+  box-shadow:inset 0 0 0 2px #d1d7bd, inset 0 0 34px #263c2b55,0 18px 38px #0007;
+}
+.siteplan:before{
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;
+  background:
+    radial-gradient(circle at 18% 18%,#d9dfc2 0 1px,transparent 2px),
+    radial-gradient(circle at 72% 70%,#344d37 0 1px,transparent 2px),
+    linear-gradient(90deg,#ffffff0b 1px,transparent 1px),
+    linear-gradient(#ffffff0b 1px,transparent 1px);
+  background-size:37px 37px,43px 43px,24px 24px,24px 24px;
+}
+.siteplan-fence{inset:8px;border:2px dashed #e0dfc2;border-radius:12px;box-shadow:0 0 0 2px #344c35;pointer-events:none}
+.siteplan-ladder{
+  top:7%;height:11%;left:39%;width:22%;border:2px solid #4d5144;border-radius:5px;
+  background:repeating-linear-gradient(90deg,#d6b45d 0 5px,#555e4b 5px 9px);
+  box-shadow:0 3px 7px #26332688;
+}
+.siteplan-ladder:after{
+  content:"СТРОИТЕЛЬНЫЙ ПОДЪЁМНИК";top:100%;font-size:7px;letter-spacing:.8px;
+  color:#f6f3dd;background:#263c2feF;border:1px solid #aab69a;border-radius:5px;
+  padding:3px 6px;white-space:nowrap;
+}
+.siteplan-building{
+  left:24%;top:21%;width:52%;height:35%;border:5px solid #d2d0b7;border-radius:9px;
+  background:linear-gradient(145deg,#87988a,#566e60 58%,#405a4c);
+  box-shadow:0 9px 0 #455344,0 0 0 4px #304b39,0 13px 18px #1c302788;
+  overflow:hidden;
+}
+.siteplan-building:before{
+  inset:9px;border:2px solid #d0d0b5;border-radius:4px;opacity:1;
+  background:
+    linear-gradient(90deg,transparent 48%,#d4d2b9 48% 52%,transparent 52%),
+    linear-gradient(0deg,transparent 48%,#d4d2b9 48% 52%,transparent 52%),
+    repeating-linear-gradient(90deg,#aeb9a5 0 12%,#4a6255 12% 14%,#9ba994 14% 26%);
+  box-shadow:inset 0 0 0 3px #526c5c;
+}
+.siteplan-building span{
+  background:linear-gradient(145deg,#243c30f5,#172b22f5);border:1px solid #d4d8bd;
+  border-radius:9px;padding:10px 12px;font-size:11px;box-shadow:0 4px 12px #0006;
+}
+.siteplan-platform{
+  border:2px solid #e1f3e9;background:linear-gradient(145deg,#358e9a,#205b68);
+  border-radius:10px;padding:7px 5px;min-width:59px;color:#f4fffa;
+  box-shadow:0 4px 0 #16444d,0 7px 12px #1c332b88;font-size:9px;letter-spacing:.2px;
+}
+.siteplan-platform small{color:#d6f2e7;font-size:8px}
+.siteplan-platform.has-tools{background:linear-gradient(145deg,#d89b43,#9c5d24);border-color:#ffdf9b;box-shadow:0 4px 0 #74451f,0 0 0 3px #ffcb6544}
+.siteplan-platform.loc-a{left:39%;top:2%}
+.siteplan-platform.loc-b{right:2%;top:34%}
+.siteplan-platform.loc-c{left:2%;top:34%}
+.siteplan-platform.loc-d{right:8%;top:59%}
+.siteplan-zone{
+  border-width:2px;border-radius:12px;padding:8px 6px;
+  box-shadow:0 5px 0 #28332688,0 8px 14px #1c302b66;
+  font-size:9px;line-height:1.3;letter-spacing:.15px;
+  backdrop-filter:blur(2px);
+}
+.siteplan-weld{
+  left:2%;top:54%;width:27%;height:17%;
+  border-color:#f0cf73;background:linear-gradient(145deg,#8c6732f5,#514126f5);color:#fff1c6;
+}
+.siteplan-weld .beams{gap:4px;margin:8px 5px 0}
+.siteplan-weld .beams i{
+  height:5px;border:1px solid #d2d2c5;border-radius:4px;
+  background:linear-gradient(180deg,#e3e5d9,#69736c 55%,#3f4942);
+  box-shadow:0 1px 2px #0008;
+}
+.siteplan-wood{
+  right:2%;top:72%;width:15%;height:14%;
+  border-color:#e0b77a;background:linear-gradient(145deg,#88613b,#4e3828);color:#ffebc9;
+}
+.siteplan-wood:after{
+  height:48px;margin:6px 3px 0;border:1px solid #e2bd82;border-radius:4px;
+  background:repeating-linear-gradient(0deg,#c89a5b 0 7px,#6e4d30 7px 10px);
+  box-shadow:inset 0 0 8px #392619;
+}
+.siteplan-box{
+  left:2%;bottom:2%;width:25%;height:14%;
+  border-color:#f3a58b;background:linear-gradient(145deg,#a65b43,#653c32);color:#fff0e8;
+}
+.siteplan-toilet{
+  left:29%;bottom:2%;width:15%;height:14%;
+  border-color:#b5e5f6;background:linear-gradient(145deg,#4387a2,#24566b);color:#e9faff;
+}
+.siteplan-security{
+  right:2%;bottom:2%;width:23%;height:15%;
+  border-color:#c3d5e6;background:linear-gradient(145deg,#506d83,#2b4053);color:#f0f7ff;
+}
+.siteplan-gate{
+  right:0;bottom:19%;width:16%;height:6px;transform:rotate(-8deg);
+  background:repeating-linear-gradient(90deg,#f4f1d9 0 9px,#c84c43 9px 18px);
+  border:1px solid #354239;border-radius:4px;box-shadow:0 2px 4px #0008;pointer-events:none;
+}
+.siteplan-label{font-size:7px;line-height:1.2;color:#fff0ce}
+.siteplan button{cursor:pointer;transition:transform .15s ease,filter .15s ease}
+.siteplan button:active{transform:scale(.96);filter:brightness(1.12)}
+@media(max-width:380px){
+ .siteplan{min-height:410px}
+ .siteplan-platform{font-size:8px;min-width:49px;padding:6px 3px}
+ .siteplan-zone{font-size:7px;padding:5px 4px}
+ .siteplan-building span{font-size:9px;padding:7px}
+ .siteplan-weld .siteplan-label{font-size:6px}
+}
 </style></head><body><div class="wrap"><header class="top"><div class="brand">TOOL<span>SITE</span><div class="eyebrow">УЧЁТ ИНСТРУМЕНТОВ</div></div><div class="avatar" id="avatar">TS</div></header>
 <section id="home" class="page active"><div class="hero"><div class="eyebrow">ПАНЕЛЬ ОБЪЕКТА</div><h1>Всё под<br>контролем.</h1><p id="welcome">Инструменты и команда — в одном месте.</p></div><div class="stats"><div class="stat"><b id="total">—</b><small>Всего</small></div><div class="stat"><b id="free">—</b><small>Свободно</small></div><div class="stat"><b id="issued">—</b><small>Выдано</small></div></div><div class="head"><h2>Быстрые действия</h2></div><div class="actions"><button id="homeAdd" class="action primary" onclick="openAdd()"><i>＋</i>Добавить инструмент</button><button class="action" onclick="openIssue()"><i>↗</i>Выдать инструмент</button><button class="action" onclick="go('tools')"><i>▤</i>Каталог</button><button class="action" onclick="go('map')"><i>⌖</i>Карта этажей и платформ</button></div><div class="home-map"><div class="home-map-head"><h2>Карта объекта</h2><span class="eyebrow">ВИД СВЕРХУ</span></div><div class="home-map-sub">НАЖМИ НА ЛЮБУЮ ЗОНУ, ЧТОБЫ ПОСМОТРЕТЬ ИНСТРУМЕНТЫ</div><div class="site-map"><div class="site-map-road"><span>ПРОЕЗД / ТЕРРИТОРИЯ ОБЪЕКТА</span></div><div class="site-map-layout"><div class="site-building"><div class="site-building-title">🏢 ЗДАНИЕ · ФАСАД</div><div class="site-building-note">Уличные рабочие платформы</div><div id="homeFacade"></div></div><button class="site-box" onclick="openPlace('box')"><span class="site-box-icon">🧰</span><b>БОКС ИНСТРУМЕНТОВ</b><small id="homeBoxCount">Загрузка…</small><span class="site-box-hint">Нажми, чтобы открыть содержимое ↗</span></button></div><div class="site-map-compass">N ↑</div></div><div class="home-map-foot"><span id="homeMapSummary">Загрузка карты…</span><button onclick="go('map')">Подробная карта ↗</button></div><div class="site-legend"><span><i class="legend-free"></i> Свободные — в боксе</span><span><i class="legend-issued"></i> Выданы — на платформе</span></div></div><div class="head"><h2>Последние события</h2><button class="link" onclick="go('journal')">Все →</button></div><div id="recent"></div></section>
 <section id="tools" class="page"><div class="head"><h2>Инструменты</h2><button id="catalogAdd" class="link" onclick="openAdd()">＋ Добавить</button></div><div id="toolList"></div></section><section id="map" class="page"><div class="game-map-top"><div><div class="eyebrow">TOOLSITE · КАРТА ОБЪЕКТА</div><h2>Территория объекта</h2></div><span class="game-map-key">⌖ ВИД СВЕРХУ</span></div><div class="game-floorbar"><span>ЭТАЖ</span><div id="gameFloorTabs"></div></div><div class="siteplan" id="gameMapCanvas"><div class="siteplan-fence"></div><div class="siteplan-ladder"></div><button class="siteplan-building" onclick="openBuilding()"><span>🏢 ОСНОВНОЕ ЗДАНИЕ<br><small>Нажми · этаж <b id="worldFloor">1</b></small></span></button><button class="siteplan-platform loc-a" onclick="openPlace('platform',selectedFloor,'A')">A · ПЛАТФОРМА<small id="locCountA">0 инструментов</small></button><button class="siteplan-platform loc-b" onclick="openPlace('platform',selectedFloor,'B')">B · ПЛАТФОРМА<small id="locCountB">0 инструментов</small></button><button class="siteplan-platform loc-c" onclick="openPlace('platform',selectedFloor,'C')">C · ПЛАТФОРМА<small id="locCountC">0 инструментов</small></button><button class="siteplan-platform loc-d" onclick="openPlace('platform',selectedFloor,'D')">D · ПЛАТФОРМА<small id="locCountD">0 инструментов</small></button><button class="siteplan-zone siteplan-weld" onclick="showSiteZone('welders')">⚡ ЗОНА СВАРЩИКОВ<div class="beams"><i></i><i></i><i></i><i></i><i></i></div><span class="siteplan-label">10 металлических балок · сварочный стол</span></button><button class="siteplan-zone siteplan-wood" onclick="showSiteZone('wood')">🪵 ДЕРЕВЯННЫЕ БАЛКИ</button><button class="siteplan-zone siteplan-box" onclick="openPlace('box')">🧰 БОКС ИНСТРУМЕНТОВ<small id="worldBoxCount">0 предметов</small></button><button class="siteplan-zone siteplan-toilet" onclick="showSiteZone('toilet')">🚻 БИОТУАЛЕТ</button><button class="siteplan-zone siteplan-security" onclick="showSiteZone('security')">🛡 ПОСТ ОХРАНЫ<span class="siteplan-label">Шлагбаум ↓</span></button><div class="siteplan-gate"></div></div><div class="game-map-legend"><span><i class="map-dot-free"></i> Бокс · свободные</span><span><i class="map-dot-work"></i> Платформа · в работе</span></div><div class="mapnotice"><b>Схема площадки.</b> Расположение объектов показано по твоим уточнениям и остаётся условным до сверки с генпланом. Нажми на платформу или бокс, чтобы посмотреть учёт инструментов.</div><p class="game-map-hint">Выбери этаж сверху, затем нажми на здание, платформу A–D или бокс. Остальные зоны открывают пояснения по объекту.</p><button class="cta" onclick="go('home')">← На главную</button></section><section id="journal" class="page"><div class="head"><h2>Журнал операций</h2></div><div id="journalList"></div></section><section id="profile" class="page"><div class="hero"><div class="eyebrow">ВАШ ПРОФИЛЬ</div><h1 id="profileName">Сотрудник</h1><p>Ваши инструменты и история действий.</p></div><div class="card" style="margin-top:14px"><div class="label">ИМЯ И ФАМИЛИЯ</div><input id="nameInput" class="field" placeholder="Например, Иван Петров"><button class="cta" onclick="saveName()">Сохранить профиль</button></div><div class="card">МОИ ИНСТРУМЕНТЫ <h2 id="mineCount">0</h2></div></section></div>
