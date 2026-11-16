@@ -1,14 +1,18 @@
 import asyncio
 import os
 import sqlite3
-from datetime import datetime
+import hmac, hashlib, json
+from urllib.parse import parse_qsl
+from datetime import datetime, timezone
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 dp = Dispatcher()
+WEBAPP_URL = os.getenv('WEBAPP_URL', 'https://toolsite-bot-production.up.railway.app')
 # Temporary conversation states. Persistent business data is stored in SQLite.
 pending = {}
 DB_PATH = os.getenv("DB_PATH", "/data/toolsite.db")
@@ -103,7 +107,8 @@ async def start(message: Message):
         greeting += f"\n\n👤 Сотрудник: {user[0]}"
     else:
         greeting += "\n\n👤 Ты ещё не зарегистрирован.\nОткрой «Сотрудники», чтобы начать."
-    await message.answer(greeting + "\n\nВыбери раздел:", reply_markup=main_menu())
+    await message.answer(greeting + "\n\nОткрой панель ToolSite:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть ToolSite", web_app=WebAppInfo(url=WEBAPP_URL))]]))
+    await message.answer("Или выбери раздел в меню:", reply_markup=main_menu())
 
 
 @dp.message(Command("cancel"))
@@ -517,6 +522,107 @@ async def show_map(callback: CallbackQuery):
     await callback.message.answer(text, reply_markup=main_menu())
 
 
+def validate_init_data(init_data, bot_token):
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = pairs.pop("hash", None)
+        if not received_hash: return None
+        check = "\n".join(f"{k}={v}" for k,v in sorted(pairs.items()))
+        secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), received_hash): return None
+        if abs(datetime.now(timezone.utc).timestamp()-int(pairs.get("auth_date","0"))) > 86400: return None
+        user = json.loads(pairs.get("user","{}"))
+        return user if user.get("id") else None
+    except Exception:
+        return None
+
+@web.middleware
+async def api_auth(request, handler):
+    if request.path.startswith("/api/"):
+        user = validate_init_data(request.headers.get("X-Telegram-Init-Data",""), os.getenv("BOT_TOKEN",""))
+        if not user: return web.json_response({"error":"Открой приложение через Telegram"},status=401)
+        request["tg_user"] = user
+    return await handler(request)
+
+async def app_index(request):
+    return web.FileResponse("webapp/index.html")
+
+async def api_state(request):
+    tg=request["tg_user"]; uid=int(tg["id"])
+    with db_connect() as c:
+        user=c.execute("SELECT name FROM users WHERE telegram_id=?",(uid,)).fetchone()
+        tools=c.execute("SELECT id,name,status,holder_id,holder_name,floor FROM tools ORDER BY name COLLATE NOCASE").fetchall()
+        staff=c.execute("SELECT telegram_id,name FROM users ORDER BY name COLLATE NOCASE").fetchall()
+        journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 30").fetchall()
+    total=len(tools); free=sum(1 for t in tools if t[2]=="free")
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid]})
+
+async def api_register(request):
+    uid=int(request["tg_user"]["id"]); d=await request.json(); name=str(d.get("name","")).strip()[:60]
+    if len(name)<2: return web.json_response({"error":"Укажи имя и фамилию"},status=400)
+    with db_connect() as c: c.execute("INSERT INTO users (telegram_id,name,created_at) VALUES (?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET name=excluded.name",(uid,name,now_text()))
+    return web.json_response({"ok":True})
+
+async def api_add_tool(request):
+    uid=int(request["tg_user"]["id"])
+    if not get_user(uid): return web.json_response({"error":"Сначала укажи имя в профиле"},status=400)
+    d=await request.json(); name=str(d.get("name","")).strip()[:100]
+    if len(name)<2: return web.json_response({"error":"Название слишком короткое"},status=400)
+    with db_connect() as c: cur=c.execute("INSERT INTO tools (name,created_at) VALUES (?,?)",(name,now_text())); tid=cur.lastrowid
+    return web.json_response({"ok":True,"id":tid})
+
+async def api_issue(request):
+    uid=int(request["tg_user"]["id"]); user=get_user(uid); d=await request.json()
+    if not user: return web.json_response({"error":"Сначала укажи имя в профиле"},status=400)
+    try: tid=int(d.get("tool_id"))
+    except: return web.json_response({"error":"Выбери инструмент"},status=400)
+    floor=str(d.get("floor","")).strip()[:40]
+    if not floor: return web.json_response({"error":"Укажи этаж или зону"},status=400)
+    with db_connect() as c:
+        tool=c.execute("SELECT name FROM tools WHERE id=? AND status='free'",(tid,)).fetchone()
+        if not tool: return web.json_response({"error":"Инструмент уже выдан или не найден"},status=409)
+        changed=c.execute("UPDATE tools SET status='issued',holder_id=?,holder_name=?,floor=? WHERE id=? AND status='free'",(uid,user[0],floor,tid)).rowcount
+        if changed: c.execute("INSERT INTO journal (tool_id,tool_name,action,user_id,user_name,floor,created_at) VALUES (?,?,'Выдача',?,?,?,?)",(tid,tool[0],uid,user[0],floor,now_text()))
+    return web.json_response({"ok":bool(changed)})
+
+async def api_return(request):
+    uid=int(request["tg_user"]["id"]); d=await request.json()
+    try: tid=int(d.get("tool_id"))
+    except: return web.json_response({"error":"Инструмент не выбран"},status=400)
+    user=get_user(uid)
+    with db_connect() as c:
+        tool=c.execute("SELECT name,floor FROM tools WHERE id=? AND holder_id=? AND status='issued'",(tid,uid)).fetchone()
+        if not tool: return web.json_response({"error":"Инструмент не закреплён за тобой"},status=409)
+        c.execute("UPDATE tools SET status='free',holder_id=NULL,holder_name=NULL,floor=NULL WHERE id=?",(tid,))
+        c.execute("INSERT INTO journal (tool_id,tool_name,action,user_id,user_name,floor,created_at) VALUES (?,?,'Возврат',?,?,?,?)",(tid,tool[0],uid,user[0] if user else "Сотрудник",tool[1],now_text()))
+    return web.json_response({"ok":True})
+
+async def api_transfer(request):
+    uid=int(request["tg_user"]["id"]); user=get_user(uid); d=await request.json()
+    try: tid,rid=int(d.get("tool_id")),int(d.get("recipient_id"))
+    except: return web.json_response({"error":"Выбери сотрудника"},status=400)
+    with db_connect() as c:
+        tool=c.execute("SELECT name,floor FROM tools WHERE id=? AND holder_id=? AND status='issued'",(tid,uid)).fetchone()
+        recipient=c.execute("SELECT name FROM users WHERE telegram_id=?",(rid,)).fetchone()
+        if not tool or not recipient or not user: return web.json_response({"error":"Передача недоступна"},status=409)
+        changed=c.execute("UPDATE tools SET holder_id=?,holder_name=? WHERE id=? AND holder_id=? AND status='issued'",(rid,recipient[0],tid,uid)).rowcount
+        if changed: c.execute("INSERT INTO journal (tool_id,tool_name,action,user_id,user_name,floor,created_at) VALUES (?,?,?,?,?,?,?)",(tid,tool[0],f"Передача: {user[0]} → {recipient[0]}",uid,user[0],tool[1],now_text()))
+    if changed:
+        try: await request.app["bot"].send_message(rid,f"🔔 Тебе передали {tool[0]} (№{tid}). Этаж: {tool[1] or 'не указан'}. Передал: {user[0]}.")
+        except Exception: pass
+    return web.json_response({"ok":bool(changed)})
+
+async def run_web_server(bot):
+    app=web.Application(middlewares=[api_auth]); app["bot"]=bot
+    app.router.add_get("/",app_index); app.router.add_get("/api/state",api_state)
+    app.router.add_post("/api/register",api_register); app.router.add_post("/api/tools",api_add_tool)
+    app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer)
+    runner=web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner,"0.0.0.0",int(os.getenv("PORT","8080"))).start()
+    return runner
+
+
+
 async def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -524,9 +630,11 @@ async def main():
     with db_connect():
         pass
     bot = Bot(token=token)
+    runner = await run_web_server(bot)
     try:
         await dp.start_polling(bot)
     finally:
+        await runner.cleanup()
         await bot.session.close()
 
 
