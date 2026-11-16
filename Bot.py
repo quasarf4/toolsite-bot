@@ -552,7 +552,13 @@ async def api_auth(request, handler):
     return await handler(request)
 
 async def app_index(request):
-    return web.FileResponse("webapp/index.html")
+    # Telegram WebView can keep an old HTML/JS snapshot after a redeploy.
+    # Always fetch the current Mini App so button handlers are not stale.
+    return web.FileResponse("webapp/index.html", headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    })
 
 async def api_state(request):
     tg=request["tg_user"]; uid=int(tg["id"])
