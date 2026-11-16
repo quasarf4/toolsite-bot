@@ -95,6 +95,16 @@ def get_user(telegram_id):
         ).fetchone()
 
 
+def is_admin_name(name):
+    normalized = " ".join(str(name or "").casefold().split())
+    return normalized in {"эмом", "амир"}
+
+
+def is_admin_user(telegram_id):
+    user = get_user(telegram_id)
+    return bool(user and is_admin_name(user[0]))
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
     pending.pop(message.from_user.id, None)
@@ -123,6 +133,10 @@ async def receive_text(message: Message):
         return
 
     if state["action"] == "add_tool":
+        if not is_admin_user(user_id):
+            pending.pop(user_id, None)
+            await message.answer("Добавлять инструменты могут только администраторы.")
+            return
         if len(value) > 100:
             await message.answer("Название слишком длинное. Максимум 100 символов.")
             return
@@ -215,6 +229,9 @@ async def open_tools(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "tool_add")
 async def add_tool_start(callback: CallbackQuery):
+    if not is_admin_user(callback.from_user.id):
+        await callback.answer("Только администратор может добавлять инструменты.", show_alert=True)
+        return
     pending[callback.from_user.id] = {"action": "add_tool"}
     await callback.answer()
     await callback.message.answer("➕ Напиши название инструмента.\nНапример: Перфоратор Bosch GBH 2-26.\nДля отмены отправь /cancel.")
@@ -545,7 +562,7 @@ async def api_state(request):
         staff=c.execute("SELECT telegram_id,name FROM users ORDER BY name COLLATE NOCASE").fetchall()
         journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 30").fetchall()
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid]})
 
 async def api_register(request):
     uid=int(request["tg_user"]["id"]); d=await request.json(); name=str(d.get("name","")).strip()[:60]
@@ -555,11 +572,26 @@ async def api_register(request):
 
 async def api_add_tool(request):
     uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid): return web.json_response({"error":"Добавлять инструменты могут только администраторы Эмом и Амир"},status=403)
     if not get_user(uid): return web.json_response({"error":"Сначала укажи имя в профиле"},status=400)
     d=await request.json(); name=str(d.get("name","")).strip()[:100]
     if len(name)<2: return web.json_response({"error":"Название слишком короткое"},status=400)
     with db_connect() as c: cur=c.execute("INSERT INTO tools (name,created_at) VALUES (?,?)",(name,now_text())); tid=cur.lastrowid
     return web.json_response({"ok":True,"id":tid})
+
+async def api_delete_tool(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid):
+        return web.json_response({"error":"Удалять инструменты могут только администраторы Эмом и Амир"},status=403)
+    d=await request.json()
+    try: tid=int(d.get("tool_id"))
+    except: return web.json_response({"error":"Инструмент не выбран"},status=400)
+    with db_connect() as c:
+        tool=c.execute("SELECT name,status,holder_name,floor FROM tools WHERE id=?",(tid,)).fetchone()
+        if not tool: return web.json_response({"error":"Инструмент не найден"},status=404)
+        if tool[1]=="issued": return web.json_response({"error":"Нельзя удалить выданный инструмент. Сначала верните его."},status=409)
+        c.execute("DELETE FROM tools WHERE id=?",(tid,))
+    return web.json_response({"ok":True,"name":tool[0]})
 
 async def api_issue(request):
     uid=int(request["tg_user"]["id"]); user=get_user(uid); d=await request.json()
@@ -605,7 +637,7 @@ async def api_transfer(request):
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth]); app["bot"]=bot
     app.router.add_get("/",app_index); app.router.add_get("/api/state",api_state)
-    app.router.add_post("/api/register",api_register); app.router.add_post("/api/tools",api_add_tool)
+    app.router.add_post("/api/register",api_register); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer)
     runner=web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner,"0.0.0.0",int(os.getenv("PORT","8080"))).start()
