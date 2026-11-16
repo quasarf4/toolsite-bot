@@ -425,13 +425,13 @@ async def transfer_to_user(callback: CallbackQuery):
 
     if changed:
         await callback.message.answer(
-            f"✅ Инструмент передан!\\n№{tool_id}: {tool[0]}\\nОт: {sender[0]}\\nКому: {recipient[0]}\\nЭтаж: {tool[1] or 'не указан'}",
+            f"✅ Инструмент передан!\n№{tool_id}: {tool[0]}\nОт: {sender[0]}\nКому: {recipient[0]}\nЭтаж: {tool[1] or 'не указан'}",
             reply_markup=main_menu()
         )
         try:
             await callback.bot.send_message(
                 recipient_id,
-                f"🔔 Тебе передали инструмент: №{tool_id} — {tool[0]}.\\nПередал: {sender[0]}.\\nЭтаж: {tool[1] or 'не указан'}."
+                f"🔔 Тебе передали инструмент: №{tool_id} — {tool[0]}.\nПередал: {sender[0]}.\nЭтаж: {tool[1] or 'не указан'}."
             )
         except Exception:
             pass
