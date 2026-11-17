@@ -2,6 +2,8 @@ import asyncio
 import os
 import sqlite3
 import hmac, hashlib, json
+import uuid
+from pathlib import Path
 from urllib.parse import parse_qsl
 from datetime import datetime, timezone
 from aiohttp import web
@@ -65,6 +67,10 @@ def db_connect():
             created_at TEXT NOT NULL
         )
     """)
+    chat_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
+    if "attachment_url" not in chat_columns: conn.execute("ALTER TABLE chat_messages ADD COLUMN attachment_url TEXT")
+    if "attachment_name" not in chat_columns: conn.execute("ALTER TABLE chat_messages ADD COLUMN attachment_name TEXT")
+    if "attachment_type" not in chat_columns: conn.execute("ALTER TABLE chat_messages ADD COLUMN attachment_type TEXT")
     tool_columns = {row[1] for row in conn.execute("PRAGMA table_info(tools)").fetchall()}
     if "due_at" not in tool_columns: conn.execute("ALTER TABLE tools ADD COLUMN due_at TEXT")
     if "reminder_sent_at" not in tool_columns: conn.execute("ALTER TABLE tools ADD COLUMN reminder_sent_at TEXT")
@@ -654,19 +660,25 @@ async def api_chat_messages(request):
         user = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
         if not user:
             return web.json_response({"error":"Сначала зарегистрируйся в профиле ToolSite"}, status=403)
-        rows = c.execute("SELECT id,user_id,user_name,message,created_at FROM chat_messages WHERE id>? ORDER BY id DESC LIMIT 100", (after,)).fetchall()
+        rows = c.execute("SELECT id,user_id,user_name,message,created_at,attachment_url,attachment_name,attachment_type FROM chat_messages WHERE id>? ORDER BY id DESC LIMIT 100", (after,)).fetchall()
     rows.reverse()
-    return web.json_response({"messages":[{"id":r[0],"user_id":r[1],"user_name":r[2],"message":r[3],"created_at":r[4]} for r in rows]})
+    return web.json_response({"messages":[{"id":r[0],"user_id":r[1],"user_name":r[2],"message":r[3],"created_at":r[4],"attachment_url":r[5],"attachment_name":r[6],"attachment_type":r[7]} for r in rows]})
 
 async def api_chat_send(request):
     uid = int(request["tg_user"]["id"])
     try:
         data = await request.json()
         message = str(data.get("message", "")).strip()
+        attachment = data.get("attachment") or {}
+        attachment_url = str(attachment.get("url", ""))
+        attachment_name = str(attachment.get("name", ""))[:180]
+        attachment_type = str(attachment.get("type", ""))[:100]
+        if attachment_url and (not attachment_url.startswith("/chat-files/") or "/" in attachment_url[len("/chat-files/"):]):
+            return web.json_response({"error":"Некорректное вложение"}, status=400)
     except Exception:
         return web.json_response({"error":"Некорректное сообщение"}, status=400)
-    if not message:
-        return web.json_response({"error":"Напиши сообщение"}, status=400)
+    if not message and not attachment_url:
+        return web.json_response({"error":"Напиши сообщение или прикрепи файл"}, status=400)
     if len(message) > 1000:
         return web.json_response({"error":"Максимум 1000 символов"}, status=400)
     with db_connect() as c:
@@ -682,9 +694,56 @@ async def api_chat_send(request):
             except Exception:
                 pass
         created = now_text()
-        cur = c.execute("INSERT INTO chat_messages (user_id,user_name,message,created_at) VALUES (?,?,?,?)", (uid, user[0], message, created))
+        cur = c.execute("INSERT INTO chat_messages (user_id,user_name,message,created_at,attachment_url,attachment_name,attachment_type) VALUES (?,?,?,?,?,?,?)", (uid, user[0], message, created, attachment_url or None, attachment_name or None, attachment_type or None))
         mid = cur.lastrowid
-    return web.json_response({"ok":True,"message":{"id":mid,"user_id":uid,"user_name":user[0],"message":message,"created_at":created}})
+    return web.json_response({"ok":True,"message":{"id":mid,"user_id":uid,"user_name":user[0],"message":message,"created_at":created,"attachment_url":attachment_url or None,"attachment_name":attachment_name or None,"attachment_type":attachment_type or None}})
+
+
+async def api_chat_upload(request):
+    uid = int(request["tg_user"]["id"])
+    with db_connect() as c:
+        user = c.execute("SELECT 1 FROM users WHERE telegram_id=?", (uid,)).fetchone()
+    if not user:
+        return web.json_response({"error":"Сначала зарегистрируйся в профиле"}, status=403)
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        if field is None or field.name != "file":
+            return web.json_response({"error":"Файл не найден"}, status=400)
+        original = Path(field.filename or "file").name
+        content_type = (field.headers.get("Content-Type") or "application/octet-stream").lower()
+        allowed = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif","application/pdf":".pdf","text/plain":".txt","application/msword":".doc","application/vnd.openxmlformats-officedocument.wordprocessingml.document":".docx","application/vnd.ms-excel":".xls","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":".xlsx"}
+        if content_type not in allowed:
+            return web.json_response({"error":"Можно прикрепить фото, PDF, Word, Excel или TXT"}, status=415)
+        folder = Path(os.getenv("CHAT_UPLOAD_DIR", "/data/chat_uploads"))
+        folder.mkdir(parents=True, exist_ok=True)
+        filename = uuid.uuid4().hex + allowed[content_type]
+        target = folder / filename
+        size = 0
+        with target.open("wb") as out:
+            while True:
+                chunk = await field.read_chunk(64 * 1024)
+                if not chunk: break
+                size += len(chunk)
+                if size > 8 * 1024 * 1024:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    return web.json_response({"error":"Максимальный размер файла — 8 МБ"}, status=413)
+                out.write(chunk)
+        if size == 0:
+            target.unlink(missing_ok=True)
+            return web.json_response({"error":"Файл пустой"}, status=400)
+        return web.json_response({"url":"/chat-files/"+filename,"name":original[:180],"type":content_type})
+    except Exception:
+        return web.json_response({"error":"Не удалось загрузить вложение"}, status=400)
+
+async def app_chat_file(request):
+    filename = request.match_info.get("filename", "")
+    if not filename or Path(filename).name != filename or not filename.replace(".", "").isalnum():
+        raise web.HTTPNotFound()
+    path = Path(os.getenv("CHAT_UPLOAD_DIR", "/data/chat_uploads")) / filename
+    if not path.is_file(): raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={"X-Content-Type-Options":"nosniff","Cache-Control":"public, max-age=31536000"})
 
 async def api_tool_history(request):
     try:
@@ -858,8 +917,8 @@ async def api_transfer(request):
 
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth]); app["bot"]=bot
-    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_get("/api/inventory",api_inventory_summary)
-    app.router.add_post("/api/register",api_register); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
+    app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_get("/api/inventory",api_inventory_summary)
+    app.router.add_post("/api/register",api_register); app.router.add_post("/api/chat/upload",api_chat_upload); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
     runner=web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner,"0.0.0.0",int(os.getenv("PORT","8080"))).start()
