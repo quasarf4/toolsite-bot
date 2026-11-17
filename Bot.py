@@ -67,6 +67,13 @@ def db_connect():
             created_at TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_notification_groups (
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT,
+            added_at TEXT NOT NULL
+        )
+    """)
     chat_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
     if "attachment_url" not in chat_columns: conn.execute("ALTER TABLE chat_messages ADD COLUMN attachment_url TEXT")
     if "attachment_name" not in chat_columns: conn.execute("ALTER TABLE chat_messages ADD COLUMN attachment_name TEXT")
@@ -200,6 +207,15 @@ def is_admin_user(telegram_id):
     user = get_user(telegram_id)
     return bool(user and is_admin_name(user[0]))
 
+
+@dp.message(Command("chat_notify"), F.chat.type.in_({"group", "supergroup"}))
+async def register_chat_notification_group(message: Message):
+    with db_connect() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO chat_notification_groups (chat_id,title,added_at) VALUES (?,?,?)",
+            (message.chat.id, message.chat.title or "Группа команды", now_text())
+        )
+    await message.answer("✅ Эта группа подключена к уведомлениям ToolSite. Теперь новые сообщения из общего чата будут приходить сюда.")
 
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -696,6 +712,24 @@ async def api_chat_send(request):
         created = now_text()
         cur = c.execute("INSERT INTO chat_messages (user_id,user_name,message,created_at,attachment_url,attachment_name,attachment_type) VALUES (?,?,?,?,?,?,?)", (uid, user[0], message, created, attachment_url or None, attachment_name or None, attachment_type or None))
         mid = cur.lastrowid
+        recipients = [row[0] for row in c.execute("SELECT telegram_id FROM users WHERE telegram_id>0").fetchall()]
+        groups = c.execute("SELECT chat_id FROM chat_notification_groups").fetchall()
+    stamp = datetime.fromisoformat(created).astimezone().strftime("%H:%M")
+    body = message or "Отправлено вложение"
+    if attachment_name:
+        body += f"\n📎 {attachment_name}"
+    notice = f"💬 Новое сообщение в общем чате ToolSite\nОт: {user[0]}\nЧто: {body[:900]}\nВо сколько: {stamp}"
+    bot = request.app["bot"]
+    for recipient_id in recipients:
+        try:
+            await bot.send_message(recipient_id, notice)
+        except Exception as exc:
+            print(f"Chat notification to {recipient_id} failed: {exc}")
+    for (group_id,) in groups:
+        try:
+            await bot.send_message(group_id, notice)
+        except Exception as exc:
+            print(f"Chat group notification to {group_id} failed: {exc}")
     return web.json_response({"ok":True,"message":{"id":mid,"user_id":uid,"user_name":user[0],"message":message,"created_at":created,"attachment_url":attachment_url or None,"attachment_name":attachment_name or None,"attachment_type":attachment_type or None}})
 
 
