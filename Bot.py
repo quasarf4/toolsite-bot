@@ -641,6 +641,30 @@ async def api_state(request):
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
     return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid]})
 
+async def api_tool_history(request):
+    try:
+        tid = int(request.match_info["tool_id"])
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Некорректный номер инструмента"}, status=400)
+    with db_connect() as c:
+        tool = c.execute(
+            "SELECT id, name, status, holder_name, floor FROM tools WHERE id = ?", (tid,)
+        ).fetchone()
+        if not tool:
+            return web.json_response({"error": "Инструмент не найден"}, status=404)
+        rows = c.execute(
+            """SELECT action, user_name, floor, created_at
+               FROM journal WHERE tool_id = ? ORDER BY id DESC LIMIT 100""",
+            (tid,)
+        ).fetchall()
+    return web.json_response({
+        "tool": {"id": tool[0], "name": tool[1], "status": tool[2],
+                 "holder": tool[3], "floor": tool[4]},
+        "history": [{"action": r[0], "user": r[1], "floor": r[2], "time": r[3]}
+                    for r in rows]
+    })
+
+
 async def api_register(request):
     uid=int(request["tg_user"]["id"]); d=await request.json(); name=str(d.get("name","")).strip()[:60]
     if len(name)<2: return web.json_response({"error":"Укажи имя и фамилию"},status=400)
@@ -713,7 +737,7 @@ async def api_transfer(request):
 
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth]); app["bot"]=bot
-    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state)
+    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history)
     app.router.add_post("/api/register",api_register); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer)
     runner=web.AppRunner(app); await runner.setup()
