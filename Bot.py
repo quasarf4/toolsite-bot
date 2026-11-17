@@ -45,6 +45,17 @@ def db_connect():
             created_at TEXT NOT NULL
         )
     """)
+    # Предварительный список сотрудников без Telegram-привязки.
+    # Отрицательные ID зарезервированы для записей-черновиков и не являются Telegram ID.
+    preset_staff = [
+        "Мансур", "Амир", "Ваня", "Эмом", "Хусейн", "Дилшод",
+        "Мирали", "Мирзоали", "Машраб", "Бахтиёр", "Хочи", "Хасан",
+    ]
+    conn.executemany(
+        "INSERT OR IGNORE INTO users (telegram_id, name, created_at) VALUES (?, ?, ?)",
+        [(-10001 - i, name, now_text()) for i, name in enumerate(preset_staff)]
+    )
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS journal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
