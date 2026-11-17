@@ -796,6 +796,7 @@ async def api_transfer(request):
         recipient=c.execute("SELECT name FROM users WHERE telegram_id=?",(rid,)).fetchone()
         if not tool or not recipient or not user: return web.json_response({"error":"Передача недоступна"},status=409)
         if rid<=0: return web.json_response({"error":"Получатель ещё не привязал Telegram. Попроси его зарегистрироваться."},status=400)
+        if rid==uid: return web.json_response({"error":"Нельзя передать инструмент самому себе"},status=400)
         if c.execute("SELECT 1 FROM transfer_requests WHERE tool_id=? AND status='pending'",(tid,)).fetchone():
             return web.json_response({"error":"Для инструмента уже ожидается подтверждение передачи"},status=409)
         cur=c.execute("INSERT INTO transfer_requests (tool_id,tool_name,sender_id,sender_name,recipient_id,recipient_name,status,created_at) VALUES (?,?,?,?,?,?,'pending',?)",(tid,tool[0],uid,user[0],rid,recipient[0],now_text()))
