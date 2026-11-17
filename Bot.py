@@ -56,6 +56,21 @@ def db_connect():
         [(-10001 - i, name, now_text()) for i, name in enumerate(preset_staff)]
     )
 
+    tool_columns = {row[1] for row in conn.execute("PRAGMA table_info(tools)").fetchall()}
+    if "due_at" not in tool_columns: conn.execute("ALTER TABLE tools ADD COLUMN due_at TEXT")
+    if "reminder_sent_at" not in tool_columns: conn.execute("ALTER TABLE tools ADD COLUMN reminder_sent_at TEXT")
+    conn.execute("""CREATE TABLE IF NOT EXISTS transfer_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, tool_id INTEGER NOT NULL, tool_name TEXT NOT NULL,
+        sender_id INTEGER NOT NULL, sender_name TEXT NOT NULL, recipient_id INTEGER NOT NULL,
+        recipient_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL, responded_at TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS inventory_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_by INTEGER NOT NULL,
+        created_by_name TEXT NOT NULL, created_at TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS inventory_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL,
+        tool_name TEXT NOT NULL, expected_count INTEGER NOT NULL,
+        counted_count INTEGER NOT NULL, difference INTEGER NOT NULL)""")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS journal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -635,11 +650,12 @@ async def api_state(request):
     tg=request["tg_user"]; uid=int(tg["id"])
     with db_connect() as c:
         user=c.execute("SELECT name FROM users WHERE telegram_id=?",(uid,)).fetchone()
-        tools=c.execute("SELECT id,name,status,holder_id,holder_name,floor FROM tools ORDER BY name COLLATE NOCASE").fetchall()
+        tools=c.execute("SELECT id,name,status,holder_id,holder_name,floor,due_at FROM tools ORDER BY name COLLATE NOCASE").fetchall()
         staff=c.execute("SELECT telegram_id,name FROM users ORDER BY name COLLATE NOCASE").fetchall()
-        journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 30").fetchall()
+        journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 50").fetchall()
+        incoming=c.execute("SELECT id,tool_id,tool_name,sender_id,sender_name,created_at FROM transfer_requests WHERE recipient_id=? AND status='pending' ORDER BY id DESC",(uid,)).fetchall()
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming]})
 
 async def api_tool_history(request):
     try:
@@ -663,6 +679,75 @@ async def api_tool_history(request):
         "history": [{"action": r[0], "user": r[1], "floor": r[2], "time": r[3]}
                     for r in rows]
     })
+
+
+async def api_staff_history(request):
+    try: staff_id = int(request.match_info["staff_id"])
+    except (TypeError, ValueError): return web.json_response({"error":"Некорректный сотрудник"},status=400)
+    with db_connect() as c:
+        person=c.execute("SELECT telegram_id,name FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
+        if not person: return web.json_response({"error":"Сотрудник не найден"},status=404)
+        rows=c.execute("SELECT tool_name,action,floor,created_at FROM journal WHERE user_id=? ORDER BY id DESC LIMIT 50",(staff_id,)).fetchall()
+        assigned=c.execute("SELECT id,name,floor,due_at FROM tools WHERE holder_id=? AND status='issued' ORDER BY name COLLATE NOCASE",(staff_id,)).fetchall()
+    return web.json_response({"staff":{"id":person[0],"name":person[1]},
+        "tools":[{"id":r[0],"name":r[1],"floor":r[2],"due_at":r[3]} for r in assigned],
+        "history":[{"tool":r[0],"action":r[1],"floor":r[2],"time":r[3]} for r in rows]})
+
+
+async def api_inventory_summary(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid): return web.json_response({"error":"Только администратор может проводить инвентаризацию"},status=403)
+    with db_connect() as c:
+        rows=c.execute("SELECT name,COUNT(*),SUM(CASE WHEN status='free' THEN 1 ELSE 0 END) FROM tools GROUP BY name ORDER BY name COLLATE NOCASE").fetchall()
+    return web.json_response({"items":[{"name":r[0],"total":r[1],"free":r[2] or 0} for r in rows]})
+
+
+async def api_inventory_check(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid): return web.json_response({"error":"Только администратор может проводить инвентаризацию"},status=403)
+    user=get_user(uid); data=await request.json(); entries=data.get("items",[])
+    if not isinstance(entries,list) or not entries: return web.json_response({"error":"Нет данных для проверки"},status=400)
+    clean=[]
+    for entry in entries:
+        name=str(entry.get("name","")).strip()[:100]
+        try: counted=int(entry.get("counted"))
+        except (TypeError,ValueError): return web.json_response({"error":"Укажи целое количество для каждой позиции"},status=400)
+        if not name or counted<0 or counted>10000: return web.json_response({"error":"Некорректное количество или название"},status=400)
+        clean.append((name,counted))
+    with db_connect() as c:
+        cur=c.execute("INSERT INTO inventory_sessions (created_by,created_by_name,created_at) VALUES (?,?,?)",(uid,user[0] if user else "Администратор",now_text()))
+        sid=cur.lastrowid; results=[]
+        for name,counted in clean:
+            expected=c.execute("SELECT COUNT(*) FROM tools WHERE name=?",(name,)).fetchone()[0]
+            diff=counted-expected
+            c.execute("INSERT INTO inventory_items (session_id,tool_name,expected_count,counted_count,difference) VALUES (?,?,?,?,?)",(sid,name,expected,counted,diff))
+            results.append({"name":name,"expected":expected,"counted":counted,"difference":diff})
+    return web.json_response({"ok":True,"session_id":sid,"items":results})
+
+
+async def api_transfer_respond(request):
+    uid=int(request["tg_user"]["id"]); data=await request.json()
+    try: rid=int(data.get("request_id"))
+    except (TypeError,ValueError): return web.json_response({"error":"Заявка не выбрана"},status=400)
+    decision=data.get("decision")
+    if decision not in ("accept","reject"): return web.json_response({"error":"Некорректное решение"},status=400)
+    with db_connect() as c:
+        tr=c.execute("SELECT tool_id,tool_name,sender_id,sender_name,recipient_name FROM transfer_requests WHERE id=? AND recipient_id=? AND status='pending'",(rid,uid)).fetchone()
+        if not tr: return web.json_response({"error":"Заявка уже обработана или недоступна"},status=409)
+        tid,name,sender_id,sender_name,recipient_name=tr
+        if decision=="accept":
+            changed=c.execute("UPDATE tools SET holder_id=?,holder_name=? WHERE id=? AND holder_id=? AND status='issued'",(uid,recipient_name,tid,sender_id)).rowcount
+            if not changed:
+                c.execute("UPDATE transfer_requests SET status='cancelled',responded_at=? WHERE id=?",(now_text(),rid))
+                return web.json_response({"error":"Инструмент уже не закреплён за отправителем"},status=409)
+            floor=c.execute("SELECT floor FROM tools WHERE id=?",(tid,)).fetchone()[0]
+            c.execute("INSERT INTO journal (tool_id,tool_name,action,user_id,user_name,floor,created_at) VALUES (?,?,?,?,?,?,?)",(tid,name,f"Передача подтверждена: {sender_name} → {recipient_name}",uid,recipient_name,floor,now_text()))
+            status="accepted"
+        else: status="rejected"
+        c.execute("UPDATE transfer_requests SET status=?,responded_at=? WHERE id=?",(status,now_text(),rid))
+    try: await request.app["bot"].send_message(sender_id,f"🔔 {recipient_name} {'принял' if decision=='accept' else 'отклонил'} передачу инструмента №{tid} — {name}.")
+    except Exception: pass
+    return web.json_response({"ok":True,"status":status})
 
 
 async def api_register(request):
@@ -701,10 +786,14 @@ async def api_issue(request):
     except: return web.json_response({"error":"Выбери инструмент"},status=400)
     floor=str(d.get("floor","")).strip()[:40]
     if not floor: return web.json_response({"error":"Укажи этаж или зону"},status=400)
+    due_date=str(d.get("due_date","")).strip(); due_at=None
+    if due_date:
+        try: due_at=datetime.fromisoformat(due_date).replace(hour=23,minute=59,second=0).astimezone().isoformat(timespec="seconds")
+        except ValueError: return web.json_response({"error":"Некорректная дата возврата"},status=400)
     with db_connect() as c:
         tool=c.execute("SELECT name FROM tools WHERE id=? AND status='free'",(tid,)).fetchone()
         if not tool: return web.json_response({"error":"Инструмент уже выдан или не найден"},status=409)
-        changed=c.execute("UPDATE tools SET status='issued',holder_id=?,holder_name=?,floor=? WHERE id=? AND status='free'",(uid,user[0],floor,tid)).rowcount
+        changed=c.execute("UPDATE tools SET status='issued',holder_id=?,holder_name=?,floor=?,due_at=?,reminder_sent_at=NULL WHERE id=? AND status='free'",(uid,user[0],floor,due_at,tid)).rowcount
         if changed: c.execute("INSERT INTO journal (tool_id,tool_name,action,user_id,user_name,floor,created_at) VALUES (?,?,'Выдача',?,?,?,?)",(tid,tool[0],uid,user[0],floor,now_text()))
     return web.json_response({"ok":bool(changed)})
 
@@ -716,7 +805,7 @@ async def api_return(request):
     with db_connect() as c:
         tool=c.execute("SELECT name,floor FROM tools WHERE id=? AND holder_id=? AND status='issued'",(tid,uid)).fetchone()
         if not tool: return web.json_response({"error":"Инструмент не закреплён за тобой"},status=409)
-        c.execute("UPDATE tools SET status='free',holder_id=NULL,holder_name=NULL,floor=NULL WHERE id=?",(tid,))
+        c.execute("UPDATE tools SET status='free',holder_id=NULL,holder_name=NULL,floor=NULL,due_at=NULL,reminder_sent_at=NULL WHERE id=?",(tid,))
         c.execute("INSERT INTO journal (tool_id,tool_name,action,user_id,user_name,floor,created_at) VALUES (?,?,'Возврат',?,?,?,?)",(tid,tool[0],uid,user[0] if user else "Сотрудник",tool[1],now_text()))
     return web.json_response({"ok":True})
 
@@ -728,22 +817,42 @@ async def api_transfer(request):
         tool=c.execute("SELECT name,floor FROM tools WHERE id=? AND holder_id=? AND status='issued'",(tid,uid)).fetchone()
         recipient=c.execute("SELECT name FROM users WHERE telegram_id=?",(rid,)).fetchone()
         if not tool or not recipient or not user: return web.json_response({"error":"Передача недоступна"},status=409)
-        changed=c.execute("UPDATE tools SET holder_id=?,holder_name=? WHERE id=? AND holder_id=? AND status='issued'",(rid,recipient[0],tid,uid)).rowcount
-        if changed: c.execute("INSERT INTO journal (tool_id,tool_name,action,user_id,user_name,floor,created_at) VALUES (?,?,?,?,?,?,?)",(tid,tool[0],f"Передача: {user[0]} → {recipient[0]}",uid,user[0],tool[1],now_text()))
-    if changed:
-        try: await request.app["bot"].send_message(rid,f"🔔 Тебе передали {tool[0]} (№{tid}). Этаж: {tool[1] or 'не указан'}. Передал: {user[0]}.")
-        except Exception: pass
-    return web.json_response({"ok":bool(changed)})
+        if rid<=0: return web.json_response({"error":"Получатель ещё не привязал Telegram. Попроси его зарегистрироваться."},status=400)
+        if c.execute("SELECT 1 FROM transfer_requests WHERE tool_id=? AND status='pending'",(tid,)).fetchone():
+            return web.json_response({"error":"Для инструмента уже ожидается подтверждение передачи"},status=409)
+        cur=c.execute("INSERT INTO transfer_requests (tool_id,tool_name,sender_id,sender_name,recipient_id,recipient_name,status,created_at) VALUES (?,?,?,?,?,?,'pending',?)",(tid,tool[0],uid,user[0],rid,recipient[0],now_text()))
+        request_id=cur.lastrowid
+    try: await request.app["bot"].send_message(rid,f"🔔 {user[0]} предлагает принять инструмент №{tid} — {tool[0]}. Открой ToolSite → Сотрудники → Входящие передачи и подтверди или отклони.")
+    except Exception: pass
+    return web.json_response({"ok":True,"request_id":request_id,"status":"pending"})
 
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth]); app["bot"]=bot
-    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history)
+    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_get("/api/inventory",api_inventory_summary)
     app.router.add_post("/api/register",api_register); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
-    app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer)
+    app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
     runner=web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner,"0.0.0.0",int(os.getenv("PORT","8080"))).start()
     return runner
 
+
+
+async def reminder_loop(bot):
+    while True:
+        try:
+            now=datetime.now().astimezone()
+            with db_connect() as c:
+                rows=c.execute("SELECT id,name,holder_id,holder_name,due_at FROM tools WHERE status='issued' AND due_at IS NOT NULL AND due_at<=? AND (reminder_sent_at IS NULL OR reminder_sent_at<?)",(now.isoformat(timespec="seconds"),now.date().isoformat())).fetchall()
+                for tid,_,_,_,_ in rows: c.execute("UPDATE tools SET reminder_sent_at=? WHERE id=?",(now.isoformat(timespec="seconds"),tid))
+                admins=c.execute("SELECT telegram_id FROM users WHERE telegram_id>0 AND lower(name) IN ('эмом','амир')").fetchall()
+            for tid,name,holder_id,holder_name,due_at in rows:
+                try: await bot.send_message(holder_id,f"⏰ Срок возврата истёк: №{tid} — {name}. Верни инструмент или свяжись с администратором.")
+                except Exception: pass
+                for (admin_id,) in admins:
+                    try: await bot.send_message(admin_id,f"⚠️ Просрочен возврат: №{tid} — {name}. Ответственный: {holder_name}. Срок: {due_at}.")
+                    except Exception: pass
+        except Exception as exc: print(f"Reminder loop error: {exc}")
+        await asyncio.sleep(3600)
 
 
 async def main():
@@ -755,9 +864,11 @@ async def main():
     bot = Bot(token=token)
     await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="ToolSite", web_app=WebAppInfo(url=WEBAPP_URL)))
     runner = await run_web_server(bot)
+    reminder_task = asyncio.create_task(reminder_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
+        reminder_task.cancel()
         await runner.cleanup()
         await bot.session.close()
 
