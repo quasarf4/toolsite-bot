@@ -56,6 +56,15 @@ def db_connect():
         [(-10001 - i, name, now_text()) for i, name in enumerate(preset_staff)]
     )
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
     tool_columns = {row[1] for row in conn.execute("PRAGMA table_info(tools)").fetchall()}
     if "due_at" not in tool_columns: conn.execute("ALTER TABLE tools ADD COLUMN due_at TEXT")
     if "reminder_sent_at" not in tool_columns: conn.execute("ALTER TABLE tools ADD COLUMN reminder_sent_at TEXT")
@@ -635,6 +644,48 @@ async def api_state(request):
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
     return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming]})
 
+async def api_chat_messages(request):
+    uid = int(request["tg_user"]["id"])
+    try:
+        after = max(0, int(request.query.get("after", "0")))
+    except (TypeError, ValueError):
+        after = 0
+    with db_connect() as c:
+        user = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        if not user:
+            return web.json_response({"error":"Сначала зарегистрируйся в профиле ToolSite"}, status=403)
+        rows = c.execute("SELECT id,user_id,user_name,message,created_at FROM chat_messages WHERE id>? ORDER BY id DESC LIMIT 100", (after,)).fetchall()
+    rows.reverse()
+    return web.json_response({"messages":[{"id":r[0],"user_id":r[1],"user_name":r[2],"message":r[3],"created_at":r[4]} for r in rows]})
+
+async def api_chat_send(request):
+    uid = int(request["tg_user"]["id"])
+    try:
+        data = await request.json()
+        message = str(data.get("message", "")).strip()
+    except Exception:
+        return web.json_response({"error":"Некорректное сообщение"}, status=400)
+    if not message:
+        return web.json_response({"error":"Напиши сообщение"}, status=400)
+    if len(message) > 1000:
+        return web.json_response({"error":"Максимум 1000 символов"}, status=400)
+    with db_connect() as c:
+        user = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        if not user:
+            return web.json_response({"error":"Сначала зарегистрируйся в профиле ToolSite"}, status=403)
+        recent = c.execute("SELECT created_at FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
+        if recent:
+            try:
+                elapsed = (datetime.now().astimezone() - datetime.fromisoformat(recent[0])).total_seconds()
+                if elapsed < 2:
+                    return web.json_response({"error":"Подожди пару секунд перед следующим сообщением"}, status=429)
+            except Exception:
+                pass
+        created = now_text()
+        cur = c.execute("INSERT INTO chat_messages (user_id,user_name,message,created_at) VALUES (?,?,?,?)", (uid, user[0], message, created))
+        mid = cur.lastrowid
+    return web.json_response({"ok":True,"message":{"id":mid,"user_id":uid,"user_name":user[0],"message":message,"created_at":created}})
+
 async def api_tool_history(request):
     try:
         tid = int(request.match_info["tool_id"])
@@ -807,8 +858,8 @@ async def api_transfer(request):
 
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth]); app["bot"]=bot
-    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_get("/api/inventory",api_inventory_summary)
-    app.router.add_post("/api/register",api_register); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
+    app.router.add_get("/",app_index); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_get("/api/inventory",api_inventory_summary)
+    app.router.add_post("/api/register",api_register); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
     runner=web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner,"0.0.0.0",int(os.getenv("PORT","8080"))).start()
