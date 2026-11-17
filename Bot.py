@@ -475,63 +475,41 @@ async def transfer_to_user(callback: CallbackQuery):
     await callback.answer()
     try:
         _, _, tool_id_text, recipient_id_text = callback.data.split(":")
-        tool_id = int(tool_id_text)
-        recipient_id = int(recipient_id_text)
+        tool_id, recipient_id = int(tool_id_text), int(recipient_id_text)
     except (ValueError, IndexError):
         await callback.message.answer("Не удалось обработать передачу. Попробуй ещё раз.")
         return
-
     sender = get_user(callback.from_user.id)
-    if not sender:
-        await callback.message.answer("Сначала зарегистрируйся в разделе «Пользователи».")
-        return
-
     with db_connect() as conn:
         tool = conn.execute(
-            "SELECT name, floor FROM tools WHERE id = ? AND holder_id = ? AND status = 'issued'",
+            "SELECT name FROM tools WHERE id=? AND holder_id=? AND status='issued'",
             (tool_id, callback.from_user.id)
         ).fetchone()
-        recipient = conn.execute(
-            "SELECT name FROM users WHERE telegram_id = ?",
-            (recipient_id,)
+        recipient = conn.execute("SELECT name FROM users WHERE telegram_id=?", (recipient_id,)).fetchone()
+        duplicate = conn.execute(
+            "SELECT 1 FROM transfer_requests WHERE tool_id=? AND status='pending'", (tool_id,)
         ).fetchone()
-
-        if not tool or not recipient:
-            await callback.message.answer("Передача не выполнена: инструмент или сотрудник уже недоступен.")
+        if not sender or not tool or not recipient or recipient_id <= 0 or duplicate:
+            await callback.message.answer("Передача недоступна: проверь инструмент и получателя.")
             return
-
-        changed = conn.execute(
-            """UPDATE tools SET holder_id = ?, holder_name = ?
-               WHERE id = ? AND holder_id = ? AND status = 'issued'""",
-            (recipient_id, recipient[0], tool_id, callback.from_user.id)
-        ).rowcount
-
-        if changed:
-            conn.execute(
-                """INSERT INTO journal
-                   (tool_id, tool_name, action, user_id, user_name, floor, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    tool_id, tool[0],
-                    f"Передача: {sender[0]} → {recipient[0]}",
-                    callback.from_user.id, sender[0], tool[1], now_text()
-                )
-            )
-
-    if changed:
-        await callback.message.answer(
-            f"✅ Инструмент передан!\n№{tool_id}: {tool[0]}\nОт: {sender[0]}\nКому: {recipient[0]}\nЭтаж: {tool[1] or 'не указан'}",
-            reply_markup=main_menu()
+        cur = conn.execute(
+            """INSERT INTO transfer_requests
+               (tool_id,tool_name,sender_id,sender_name,recipient_id,recipient_name,status,created_at)
+               VALUES (?,?,?,?,?,?,'pending',?)""",
+            (tool_id, tool[0], callback.from_user.id, sender[0], recipient_id, recipient[0], now_text())
         )
-        try:
-            await callback.bot.send_message(
-                recipient_id,
-                f"🔔 Тебе передали инструмент: №{tool_id} — {tool[0]}.\nПередал: {sender[0]}.\nЭтаж: {tool[1] or 'не указан'}."
-            )
-        except Exception:
-            pass
-    else:
-        await callback.message.answer("Передача не выполнена: инструмент уже мог быть передан другому сотруднику.")
+        request_id = cur.lastrowid
+    await callback.message.answer(
+        f"Запрос на передачу №{request_id} отправлен. Инструмент останется за тобой до подтверждения."
+    )
+    try:
+        await callback.bot.send_message(
+            recipient_id,
+            f"🔔 {sender[0]} предлагает принять инструмент №{tool_id} — {tool[0]}. "
+            "Открой ToolSite → Сотрудники → Входящие передачи и подтверди или отклони."
+        )
+    except Exception:
+        pass
 
 
 @dp.callback_query(F.data == "users")
