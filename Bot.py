@@ -68,6 +68,61 @@ def db_connect():
             created_at TEXT NOT NULL
         )
     """)
+
+    # Одноразовый импорт стартового остатка: все позиции добавляются свободными.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS data_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    migration_name = "initial_inventory_import_2026_11"
+    already_imported = conn.execute(
+        "SELECT 1 FROM data_migrations WHERE name = ?", (migration_name,)
+    ).fetchone()
+    if not already_imported:
+        inventory = [
+            ("Плиткорез", 2),
+            ("Пылесос", 2),
+            ("Пистолет (тип не уточнён)", 3),
+            ("Топор", 3),
+            ("Молоток", 4),
+            ("Кувалда", 1),
+            ("Гвоздодёр", 1),
+            ("Киянка", 3),
+            ("Удлинитель", 4),
+            ("Прожектор", 4),
+            ("Миксер строительный", 2),
+            ("Лобзик", 1),
+            ("Перфоратор", 2),
+            ("Болгарка маленькая", 3),
+            ("Болгарка большая", 1),
+            ("Отбойный молоток", 1),
+            ("Шуруповёрт", 2),
+            ("Гайковёрт", 1),
+            ("Лазер (тип не уточнён)", 1),
+            ("Рулетка", 17),
+            ("Уровень строительный", 3),
+            ("Нож малярный", 11),
+            ("Пассатижи", 2),
+            ("Ножницы", 2),
+            ("Отвёртка", 5),
+            ("Пила", 1),
+            ("Насадки для шуруповёрта (пачка)", 1),
+            ("Свёрла (пачка)", 1),
+            ("Переходник для перфоратора", 1),
+            ("Пистолет для герметика", 3),
+            ("Бита для гайковёрта", 3),
+        ]
+        for tool_name, quantity in inventory:
+            conn.executemany(
+                "INSERT INTO tools (name, created_at) VALUES (?, ?)",
+                [(tool_name, now_text()) for _ in range(quantity)]
+            )
+        conn.execute(
+            "INSERT INTO data_migrations (name, applied_at) VALUES (?, ?)",
+            (migration_name, now_text())
+        )
     conn.commit()
     return conn
 
