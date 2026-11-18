@@ -1035,7 +1035,9 @@ async def api_delete_tool(request):
     return web.json_response({"ok":True,"name":tool[0]})
 
 async def api_issue(request):
-    uid=int(request["tg_user"]["id"]); user=get_user(uid); d=await request.json()
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid): return web.json_response({"error":"Выдавать инструменты могут только администраторы Эмом и Амир"},status=403)
+    user=get_user(uid); d=await request.json()
     if not user: return web.json_response({"error":"Сначала укажи имя в профиле"},status=400)
     try: tid=int(d.get("tool_id"))
     except: return web.json_response({"error":"Выбери инструмент"},status=400)
