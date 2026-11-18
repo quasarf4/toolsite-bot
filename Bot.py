@@ -968,8 +968,23 @@ async def api_transfer_respond(request):
             status="accepted"
         else: status="rejected"
         c.execute("UPDATE transfer_requests SET status=?,responded_at=? WHERE id=?",(status,now_text(),rid))
-    try: await request.app["bot"].send_message(sender_id,f"🔔 {recipient_name} {'принял' if decision=='accept' else 'отклонил'} передачу инструмента №{tid} — {name}.")
-    except Exception: pass
+    if decision=="accept":
+        created=now_text()
+        notice=f"🔄 Передача инструмента подтверждена\nОт: {sender_name}\nКому: {recipient_name}\nИнструмент: {name} · №{tid}"
+        with db_connect() as c:
+            c.execute("INSERT INTO chat_messages (user_id,user_name,message,created_at) VALUES (?,?,?,?)",(uid,"Система · ToolSite",notice,created))
+            recipients=[row[0] for row in c.execute("SELECT telegram_id FROM users WHERE telegram_id>0").fetchall()]
+            groups=[row[0] for row in c.execute("SELECT chat_id FROM chat_notification_groups").fetchall()]
+        bot=request.app["bot"]
+        for recipient_id in recipients:
+            try: await bot.send_message(recipient_id,"📣 "+notice)
+            except Exception as exc: print(f"Transfer notification to {recipient_id} failed: {exc}")
+        for group_id in groups:
+            try: await bot.send_message(group_id,"📣 "+notice)
+            except Exception as exc: print(f"Transfer group notification to {group_id} failed: {exc}")
+    else:
+        try: await request.app["bot"].send_message(sender_id,f"🔔 {recipient_name} отклонил передачу инструмента №{tid} — {name}.")
+        except Exception: pass
     return web.json_response({"ok":True,"status":status})
 
 
@@ -1103,6 +1118,7 @@ async def api_return(request):
     try: tid=int(d.get("tool_id"))
     except: return web.json_response({"error":"Инструмент не выбран"},status=400)
     user=get_user(uid)
+    if not is_admin_user(uid): return web.json_response({"error":"Сотрудники могут только передавать закреплённые инструменты. Возврат на склад выполняет администратор."},status=403)
     with db_connect() as c:
         tool=c.execute("SELECT name,floor FROM tools WHERE id=? AND holder_id=? AND status='issued'",(tid,uid)).fetchone()
         if not tool: return web.json_response({"error":"Инструмент не закреплён за тобой"},status=409)
