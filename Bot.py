@@ -323,9 +323,8 @@ async def start(message: Message):
                 if target and current[0] != target[0]:
                     await message.answer("❌ Этот Telegram уже закреплён за другим сотрудником. Обратись к администратору.")
                     return
-                if not target and current[0] != c.execute("SELECT name FROM users WHERE telegram_id=?", (claimed_by,)).fetchone()[0]:
-                    await message.answer("❌ Не удалось подтвердить привязку. Обратись к администратору.")
-                    return
+                if target:
+                    c.execute("DELETE FROM users WHERE telegram_id=?", (staff_id,))
             else:
                 if not target:
                     await message.answer("❌ Запись сотрудника уже привязана или удалена. Обратись к администратору.")
@@ -334,6 +333,17 @@ async def start(message: Message):
                 if duplicate:
                     await message.answer("❌ Для этого сотрудника уже есть Telegram-аккаунт. Обратись к администратору.")
                     return
+                for table, column in (
+                    ("tools","holder_id"), ("journal","user_id"),
+                    ("transfer_requests","sender_id"), ("transfer_requests","recipient_id"),
+                    ("staff_locations","telegram_id"), ("consumable_requests","requested_by"),
+                    ("site_notes","created_by"), ("chat_messages","user_id"),
+                    ("inventory_sessions","created_by"),
+                ):
+                    try:
+                        c.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?", (uid,staff_id))
+                    except sqlite3.OperationalError:
+                        pass
                 c.execute("UPDATE users SET telegram_id=? WHERE telegram_id=?", (uid, staff_id))
             c.execute("UPDATE staff_invites SET claimed_by=?,claimed_at=? WHERE staff_id=?", (uid, now_text(), staff_id))
             linked = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
