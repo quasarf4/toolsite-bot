@@ -6,11 +6,12 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 dp = Dispatcher()
@@ -58,6 +59,17 @@ def db_connect():
         [(-10001 - i, name, now_text()) for i, name in enumerate(preset_staff)]
     )
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS staff_locations (
+            telegram_id INTEGER PRIMARY KEY, latitude REAL NOT NULL, longitude REAL NOT NULL,
+            accuracy REAL, updated_at TEXT NOT NULL, report_date TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS location_daily_requests (
+            request_date TEXT PRIMARY KEY, sent_at TEXT NOT NULL, followup_sent INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,6 +266,18 @@ async def cancel_action(message: Message):
     await message.answer("Действие отменено.", reply_markup=main_menu())
 
 
+@dp.message(F.location, F.chat.type == "private")
+async def receive_staff_location(message: Message):
+    uid = message.from_user.id
+    user = get_user(uid)
+    if not user:
+        await message.answer("Сначала зарегистрируйся в ToolSite, чтобы привязать геопозицию к своему имени.")
+        return
+    loc = message.location
+    local_now = datetime.now(ZoneInfo("Europe/Moscow"))
+    with db_connect() as c:
+        c.execute("""INSERT INTO staff_locations (telegram_id,latitude,longitude,accuracy,updated_at,report_date) VALUES (?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET latitude=excluded.latitude,longitude=excluded.longitude,accuracy=excluded.accuracy,updated_at=excluded.updated_at,report_date=excluded.report_date""",(uid,loc.latitude,loc.longitude,loc.horizontal_accuracy,local_now.isoformat(timespec="seconds"),local_now.date().isoformat()))
+    await message.answer("✅ Геопозиция получена и сохранена для карты ToolSite. Это разовая отметка, а не непрерывное отслеживание.", reply_markup=ReplyKeyboardRemove())
 @dp.message(F.text)
 async def receive_text(message: Message):
     user_id = message.from_user.id
@@ -695,8 +719,9 @@ async def api_state(request):
             consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE status='pending' ORDER BY id DESC LIMIT 100").fetchall()
         else:
             consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE requested_by=? ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
+        locations=c.execute("SELECT l.telegram_id,u.name,l.latitude,l.longitude,l.accuracy,l.updated_at FROM staff_locations l JOIN users u ON u.telegram_id=l.telegram_id ORDER BY l.updated_at DESC").fetchall() if user and is_admin_name(user[0]) else []
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations]})
 
 async def api_chat_messages(request):
     uid = int(request["tg_user"]["id"])
@@ -1087,6 +1112,32 @@ async def reminder_loop(bot):
         await asyncio.sleep(3600)
 
 
+async def location_request_loop(bot):
+    tz = ZoneInfo("Europe/Moscow")
+    keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📍 Отправить геопозицию", request_location=True)]], resize_keyboard=True, one_time_keyboard=True)
+    while True:
+        try:
+            now = datetime.now(tz)
+            today = now.date().isoformat()
+            with db_connect() as c:
+                sent = c.execute("SELECT sent_at,followup_sent FROM location_daily_requests WHERE request_date=?", (today,)).fetchone()
+                users = c.execute("SELECT telegram_id,name FROM users WHERE telegram_id>0 ORDER BY name").fetchall()
+                if now.hour == 9 and now.minute == 0 and not sent:
+                    c.execute("INSERT OR IGNORE INTO location_daily_requests (request_date,sent_at,followup_sent) VALUES (?,?,0)", (today,now.isoformat(timespec="seconds")))
+                    targets = list(users); followup = False
+                elif now.hour == 9 and now.minute == 15 and sent and not sent[1]:
+                    responded = {row[0] for row in c.execute("SELECT telegram_id FROM staff_locations WHERE report_date=?", (today,)).fetchall()}
+                    targets = [row for row in users if row[0] not in responded]
+                    c.execute("UPDATE location_daily_requests SET followup_sent=1 WHERE request_date=?", (today,)); followup = True
+                else:
+                    targets = []; followup = False
+            for telegram_id,name in targets:
+                try:
+                    text = ("🔔 Напоминание: геопозиция на сегодня ещё не получена. Нажми кнопку ниже и отправь своё местоположение на объекте." if followup else "Доброе утро! 📍 Отправь геопозицию, чтобы отметить своё местоположение на объекте. Нажми кнопку ниже и подтверди отправку.")
+                    await bot.send_message(telegram_id,text,reply_markup=keyboard)
+                except Exception as exc: print(f"Location request failed for {telegram_id} ({name}): {exc}")
+        except Exception as exc: print(f"Location request loop error: {exc}")
+        await asyncio.sleep(30)
 async def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -1097,10 +1148,12 @@ async def main():
     await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="ToolSite", web_app=WebAppInfo(url=WEBAPP_URL)))
     runner = await run_web_server(bot)
     reminder_task = asyncio.create_task(reminder_loop(bot))
+    location_task = asyncio.create_task(location_request_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
+        location_task.cancel()
         await runner.cleanup()
         await bot.session.close()
 
