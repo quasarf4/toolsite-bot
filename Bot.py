@@ -106,6 +106,31 @@ def db_connect():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS consumables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            unit TEXT NOT NULL DEFAULT 'шт.',
+            quantity INTEGER NOT NULL DEFAULT 0,
+            min_quantity INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS consumable_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            consumable_id INTEGER NOT NULL,
+            consumable_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            note TEXT,
+            requested_by INTEGER NOT NULL,
+            requested_by_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            responded_at TEXT
+        )
+    """)
+
     # Одноразовый импорт стартового остатка: все позиции добавляются свободными.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS data_migrations (
@@ -663,8 +688,13 @@ async def api_state(request):
         staff=c.execute("SELECT telegram_id,name FROM users ORDER BY name COLLATE NOCASE").fetchall()
         journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 50").fetchall()
         incoming=c.execute("SELECT id,tool_id,tool_name,sender_id,sender_name,created_at FROM transfer_requests WHERE recipient_id=? AND status='pending' ORDER BY id DESC",(uid,)).fetchall()
+        consumables=c.execute("SELECT id,name,unit,quantity,min_quantity,updated_at FROM consumables ORDER BY name COLLATE NOCASE").fetchall()
+        if user and is_admin_name(user[0]):
+            consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE status='pending' ORDER BY id DESC LIMIT 100").fetchall()
+        else:
+            consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE requested_by=? ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests]})
 
 async def api_chat_messages(request):
     uid = int(request["tg_user"]["id"])
@@ -878,6 +908,82 @@ async def api_register(request):
     with db_connect() as c: c.execute("INSERT INTO users (telegram_id,name,created_at) VALUES (?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET name=excluded.name",(uid,name,now_text()))
     return web.json_response({"ok":True})
 
+async def api_add_consumable(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid): return web.json_response({"error":"Добавлять расходники могут только администраторы Эмом и Амир"},status=403)
+    data=await request.json()
+    name=str(data.get("name","")).strip()[:100]
+    unit=str(data.get("unit","шт.")).strip()[:20] or "шт."
+    try:
+        quantity=int(data.get("quantity",0)); minimum=int(data.get("min_quantity",0))
+    except (TypeError,ValueError):
+        return web.json_response({"error":"Количество и минимальный остаток должны быть целыми числами"},status=400)
+    if len(name)<2 or quantity<0 or minimum<0 or quantity>100000 or minimum>100000:
+        return web.json_response({"error":"Проверь название и количество расходника"},status=400)
+    with db_connect() as c:
+        cur=c.execute("INSERT INTO consumables (name,unit,quantity,min_quantity,updated_at) VALUES (?,?,?,?,?)",(name,unit,quantity,minimum,now_text()))
+        item_id=cur.lastrowid
+    return web.json_response({"ok":True,"id":item_id})
+
+
+async def api_update_consumable(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid): return web.json_response({"error":"Изменять остатки могут только администраторы Эмом и Амир"},status=403)
+    data=await request.json()
+    try:
+        item_id=int(data.get("id")); quantity=int(data.get("quantity")); minimum=int(data.get("min_quantity"))
+    except (TypeError,ValueError):
+        return web.json_response({"error":"Укажи корректные количества"},status=400)
+    if quantity<0 or minimum<0 or quantity>100000 or minimum>100000:
+        return web.json_response({"error":"Количество не может быть отрицательным или больше 100000"},status=400)
+    with db_connect() as c:
+        changed=c.execute("UPDATE consumables SET quantity=?,min_quantity=?,updated_at=? WHERE id=?",(quantity,minimum,now_text(),item_id)).rowcount
+    if not changed: return web.json_response({"error":"Расходник не найден"},status=404)
+    return web.json_response({"ok":True})
+
+
+async def api_request_consumable(request):
+    uid=int(request["tg_user"]["id"]); user=get_user(uid)
+    if not user: return web.json_response({"error":"Сначала зарегистрируйся в профиле"},status=403)
+    data=await request.json()
+    try: item_id=int(data.get("id")); quantity=int(data.get("quantity"))
+    except (TypeError,ValueError): return web.json_response({"error":"Укажи количество для заказа"},status=400)
+    note=str(data.get("note","")).strip()[:300]
+    if quantity<1 or quantity>100000: return web.json_response({"error":"Количество для заказа должно быть от 1 до 100000"},status=400)
+    with db_connect() as c:
+        item=c.execute("SELECT name FROM consumables WHERE id=?",(item_id,)).fetchone()
+        if not item: return web.json_response({"error":"Расходник не найден"},status=404)
+        cur=c.execute("INSERT INTO consumable_requests (consumable_id,consumable_name,quantity,note,requested_by,requested_by_name,status,created_at) VALUES (?,?,?,?,?,?,'pending',?)",(item_id,item[0],quantity,note,uid,user[0],now_text()))
+        request_id=cur.lastrowid
+        admins=c.execute("SELECT telegram_id FROM users WHERE telegram_id>0 AND lower(name) IN ('эмом','амир')").fetchall()
+    for (admin_id,) in admins:
+        try:
+            await request.app["bot"].send_message(admin_id,f"📦 Новая заявка на расходники\nОт: {user[0]}\nПозиция: {item[0]}\nКоличество: {quantity}\n{('Комментарий: '+note) if note else ''}\nОткрой ToolSite → Расходники.")
+        except Exception:
+            pass
+    return web.json_response({"ok":True,"request_id":request_id})
+
+
+async def api_respond_consumable_request(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid): return web.json_response({"error":"Обрабатывать заявки могут только администраторы Эмом и Амир"},status=403)
+    data=await request.json()
+    try: request_id=int(data.get("request_id"))
+    except (TypeError,ValueError): return web.json_response({"error":"Заявка не выбрана"},status=400)
+    status=str(data.get("status",""))
+    if status not in ("ordered","rejected"): return web.json_response({"error":"Некорректный статус заявки"},status=400)
+    with db_connect() as c:
+        row=c.execute("SELECT requested_by,consumable_name,quantity FROM consumable_requests WHERE id=? AND status='pending'",(request_id,)).fetchone()
+        if not row: return web.json_response({"error":"Заявка уже обработана или не найдена"},status=409)
+        c.execute("UPDATE consumable_requests SET status=?,responded_at=? WHERE id=?",(status,now_text(),request_id))
+    try:
+        label="отмечена как заказанная" if status=="ordered" else "отклонена"
+        await request.app["bot"].send_message(row[0],f"📦 Твоя заявка: {row[1]} · {row[2]} — {label}.")
+    except Exception:
+        pass
+    return web.json_response({"ok":True,"status":status})
+
+
 async def api_add_tool(request):
     uid=int(request["tg_user"]["id"])
     if not is_admin_user(uid): return web.json_response({"error":"Добавлять инструменты могут только администраторы Эмом и Амир"},status=403)
@@ -952,6 +1058,7 @@ async def api_transfer(request):
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth], client_max_size=9 * 1024 * 1024); app["bot"]=bot
     app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_get("/api/inventory",api_inventory_summary)
+    app.router.add_post("/api/consumables",api_add_consumable); app.router.add_post("/api/consumables/update",api_update_consumable); app.router.add_post("/api/consumables/request",api_request_consumable); app.router.add_post("/api/consumables/respond",api_respond_consumable_request)
     app.router.add_post("/api/register",api_register); app.router.add_post("/api/chat/upload",api_chat_upload); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
     runner=web.AppRunner(app); await runner.setup()
