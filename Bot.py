@@ -667,9 +667,11 @@ async def api_auth(request, handler):
     return await handler(request)
 
 async def app_index(request):
-    # Telegram WebView can keep an old HTML/JS snapshot after a redeploy.
-    # Always fetch the current Mini App so button handlers are not stale.
-    return web.FileResponse("webapp/index.html", headers={
+    # Inject the public browser-side Yandex Maps key at response time;
+    # keep it out of the repository and source file.
+    html = open("webapp/index.html", encoding="utf-8").read()
+    html = html.replace("__YANDEX_MAPS_API_KEY__", os.getenv("YANDEX_MAPS_API_KEY", ""))
+    return web.Response(text=html, content_type="text/html", charset="utf-8", headers={
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
