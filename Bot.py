@@ -3,6 +3,7 @@ import os
 import sqlite3
 import hmac, hashlib, json
 import uuid
+import secrets
 from pathlib import Path
 from urllib.parse import parse_qsl
 from datetime import datetime, timezone
@@ -59,6 +60,15 @@ def db_connect():
         [(-10001 - i, name, now_text()) for i, name in enumerate(preset_staff)]
     )
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS staff_invites (
+            staff_id INTEGER PRIMARY KEY,
+            token TEXT NOT NULL UNIQUE,
+            claimed_by INTEGER,
+            created_at TEXT NOT NULL,
+            claimed_at TEXT
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS staff_locations (
             telegram_id INTEGER PRIMARY KEY, latitude REAL NOT NULL, longitude REAL NOT NULL,
@@ -258,6 +268,30 @@ def is_admin_user(telegram_id):
     return bool(user and is_admin_name(user[0]))
 
 
+@dp.message(Command("invites"), F.chat.type == "private")
+async def send_staff_invites(message: Message):
+    if not is_admin_user(message.from_user.id):
+        await message.answer("❌ Создавать приглашения могут только администраторы Эмом и Амир.")
+        return
+    with db_connect() as c:
+        placeholders = c.execute("SELECT telegram_id,name FROM users WHERE telegram_id<0 ORDER BY name COLLATE NOCASE").fetchall()
+        for staff_id, _name in placeholders:
+            existing = c.execute("SELECT token FROM staff_invites WHERE staff_id=?", (staff_id,)).fetchone()
+            if not existing:
+                token = secrets.token_urlsafe(12)
+                c.execute("INSERT INTO staff_invites (staff_id,token,created_at) VALUES (?,?,?)", (staff_id,token,now_text()))
+        links = c.execute("""SELECT u.name,i.token,i.claimed_by FROM staff_invites i
+                             JOIN users u ON u.telegram_id=i.staff_id
+                             ORDER BY u.name COLLATE NOCASE""").fetchall()
+    bot_info = await message.bot.get_me()
+    lines = ["🔐 Персональные ссылки ToolSite:", "Каждая ссылка предназначена только для указанного сотрудника."]
+    for name, token, claimed_by in links:
+        if claimed_by:
+            lines.append(f"\n{name} — уже привязан")
+        else:
+            lines.append(f"\n{name}: https://t.me/{bot_info.username}?start={token}")
+    await message.answer("\n".join(lines), disable_web_page_preview=True)
+
 @dp.message(Command("chat_notify"), F.chat.type.in_({"group", "supergroup"}))
 async def register_chat_notification_group(message: Message):
     with db_connect() as c:
@@ -270,8 +304,46 @@ async def register_chat_notification_group(message: Message):
 @dp.message(CommandStart())
 async def start(message: Message):
     pending.pop(message.from_user.id, None)
-    # Telegram requires text for inline keyboards; use an invisible separator.
-    await message.answer("\u2063", reply_markup=main_menu())
+    uid = message.from_user.id
+    parts = (message.text or "").split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if payload:
+        with db_connect() as c:
+            invite = c.execute("SELECT staff_id,claimed_by FROM staff_invites WHERE token=?", (payload,)).fetchone()
+            if not invite:
+                await message.answer("❌ Ссылка приглашения недействительна. Попроси администратора прислать новую.")
+                return
+            staff_id, claimed_by = invite
+            current = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
+            target = c.execute("SELECT name FROM users WHERE telegram_id=?", (staff_id,)).fetchone()
+            if claimed_by and int(claimed_by) != uid:
+                await message.answer("❌ Это приглашение уже использовано другим Telegram-аккаунтом. Обратись к администратору.")
+                return
+            if current:
+                if target and current[0] != target[0]:
+                    await message.answer("❌ Этот Telegram уже закреплён за другим сотрудником. Обратись к администратору.")
+                    return
+                if not target and current[0] != c.execute("SELECT name FROM users WHERE telegram_id=?", (claimed_by,)).fetchone()[0]:
+                    await message.answer("❌ Не удалось подтвердить привязку. Обратись к администратору.")
+                    return
+            else:
+                if not target:
+                    await message.answer("❌ Запись сотрудника уже привязана или удалена. Обратись к администратору.")
+                    return
+                duplicate = c.execute("SELECT telegram_id FROM users WHERE name=? AND telegram_id>0", (target[0],)).fetchone()
+                if duplicate:
+                    await message.answer("❌ Для этого сотрудника уже есть Telegram-аккаунт. Обратись к администратору.")
+                    return
+                c.execute("UPDATE users SET telegram_id=? WHERE telegram_id=?", (uid, staff_id))
+            c.execute("UPDATE staff_invites SET claimed_by=?,claimed_at=? WHERE staff_id=?", (uid, now_text(), staff_id))
+            linked = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        await message.answer(f"✅ Аккаунт закреплён за сотрудником: {linked[0]}. Теперь открывай ToolSite через кнопку ниже.", reply_markup=main_menu())
+        return
+    user = get_user(uid)
+    if user:
+        await message.answer("✅ Ты уже зарегистрирован в ToolSite.", reply_markup=main_menu())
+    else:
+        await message.answer("Для входа в ToolSite нужна персональная ссылка-приглашение. Попроси её у администратора.")
 
 @dp.message(Command("cancel"))
 async def cancel_action(message: Message):
@@ -991,7 +1063,14 @@ async def api_transfer_respond(request):
 async def api_register(request):
     uid=int(request["tg_user"]["id"]); d=await request.json(); name=str(d.get("name","")).strip()[:60]
     if len(name)<2: return web.json_response({"error":"Укажи имя и фамилию"},status=400)
-    with db_connect() as c: c.execute("INSERT INTO users (telegram_id,name,created_at) VALUES (?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET name=excluded.name",(uid,name,now_text()))
+    with db_connect() as c:
+        user=c.execute("SELECT name FROM users WHERE telegram_id=?",(uid,)).fetchone()
+        if not user:
+            return web.json_response({"error":"Вход доступен только по персональной ссылке-приглашению администратора"},status=403)
+        if user[0] != name and not is_admin_user(uid):
+            return web.json_response({"error":"Имя закреплено за приглашением. Для изменения обратись к администратору."},status=403)
+        if user[0] != name:
+            c.execute("UPDATE users SET name=? WHERE telegram_id=?",(name,uid))
     return web.json_response({"ok":True})
 
 async def api_add_consumable(request):
