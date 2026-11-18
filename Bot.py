@@ -119,6 +119,19 @@ def db_connect():
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS site_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            area TEXT NOT NULL,
+            note TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_by_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            resolved_by TEXT,
+            resolved_at TEXT
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS consumables (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -720,8 +733,39 @@ async def api_state(request):
         else:
             consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE requested_by=? ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
         locations=c.execute("SELECT l.telegram_id,u.name,l.latitude,l.longitude,l.accuracy,l.updated_at FROM staff_locations l JOIN users u ON u.telegram_id=l.telegram_id ORDER BY l.updated_at DESC").fetchall() if user and is_admin_name(user[0]) else []
+        site_notes=c.execute("SELECT id,area,note,created_by_name,status,created_at,resolved_by,resolved_at FROM site_notes ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,id DESC LIMIT 100").fetchall()
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes]})
+
+async def api_site_note_add(request):
+    uid=int(request["tg_user"]["id"])
+    user=get_user(uid)
+    if not user:
+        return web.json_response({"error":"Сначала зарегистрируйся в профиле"},status=403)
+    data=await request.json()
+    area=str(data.get("area","")).strip()[:80]
+    note=str(data.get("note","")).strip()[:600]
+    if len(area)<2 or len(note)<3:
+        return web.json_response({"error":"Укажи участок и опиши задачу или замечание"},status=400)
+    with db_connect() as c:
+        cur=c.execute("INSERT INTO site_notes (area,note,created_by,created_by_name,status,created_at) VALUES (?,?,?,?, 'open', ?)",(area,note,uid,user[0],now_text()))
+        note_id=cur.lastrowid
+    return web.json_response({"ok":True,"id":note_id})
+
+
+async def api_site_note_resolve(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid):
+        return web.json_response({"error":"Закрывать задачи могут только администраторы Эмом и Амир"},status=403)
+    data=await request.json()
+    try: note_id=int(data.get("id"))
+    except (TypeError,ValueError): return web.json_response({"error":"Задача не выбрана"},status=400)
+    user=get_user(uid)
+    with db_connect() as c:
+        changed=c.execute("UPDATE site_notes SET status='done',resolved_by=?,resolved_at=? WHERE id=? AND status='open'",(user[0] if user else "Администратор",now_text(),note_id)).rowcount
+    if not changed: return web.json_response({"error":"Задача уже закрыта или не найдена"},status=404)
+    return web.json_response({"ok":True})
+
 
 async def api_chat_messages(request):
     uid = int(request["tg_user"]["id"])
@@ -1089,7 +1133,7 @@ async def run_web_server(bot):
     app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_get("/api/inventory",api_inventory_summary)
     app.router.add_post("/api/consumables",api_add_consumable); app.router.add_post("/api/consumables/update",api_update_consumable); app.router.add_post("/api/consumables/request",api_request_consumable); app.router.add_post("/api/consumables/respond",api_respond_consumable_request)
     app.router.add_post("/api/register",api_register); app.router.add_post("/api/chat/upload",api_chat_upload); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
-    app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
+    app.router.add_post("/api/site-notes",api_site_note_add); app.router.add_post("/api/site-notes/resolve",api_site_note_resolve); app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
     runner=web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner,"0.0.0.0",int(os.getenv("PORT","8080"))).start()
     return runner
