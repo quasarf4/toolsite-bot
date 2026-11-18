@@ -1122,10 +1122,10 @@ async def location_request_loop(bot):
             with db_connect() as c:
                 sent = c.execute("SELECT sent_at,followup_sent FROM location_daily_requests WHERE request_date=?", (today,)).fetchone()
                 users = c.execute("SELECT telegram_id,name FROM users WHERE telegram_id>0 ORDER BY name").fetchall()
-                if now.hour == 9 and now.minute == 0 and not sent:
+                if now.hour == 9 and not sent:
                     c.execute("INSERT OR IGNORE INTO location_daily_requests (request_date,sent_at,followup_sent) VALUES (?,?,0)", (today,now.isoformat(timespec="seconds")))
                     targets = list(users); followup = False
-                elif now.hour == 9 and now.minute == 15 and sent and not sent[1]:
+                elif now.hour == 9 and now.minute >= 15 and sent and not sent[1]:
                     responded = {row[0] for row in c.execute("SELECT telegram_id FROM staff_locations WHERE report_date=?", (today,)).fetchall()}
                     targets = [row for row in users if row[0] not in responded]
                     c.execute("UPDATE location_daily_requests SET followup_sent=1 WHERE request_date=?", (today,)); followup = True
