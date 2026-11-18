@@ -49,6 +49,9 @@ def db_connect():
             created_at TEXT NOT NULL
         )
     """)
+    user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "username" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
     # Предварительный список сотрудников без Telegram-привязки.
     # Отрицательные ID зарезервированы для записей-черновиков и не являются Telegram ID.
     preset_staff = [
@@ -804,9 +807,12 @@ async def app_map_image(request):
 async def api_state(request):
     tg=request["tg_user"]; uid=int(tg["id"])
     with db_connect() as c:
+        username=str(tg.get("username") or "").strip().lstrip("@") or None
+        if username:
+            c.execute("UPDATE users SET username=? WHERE telegram_id=?",(username,uid))
         user=c.execute("SELECT name FROM users WHERE telegram_id=?",(uid,)).fetchone()
         tools=c.execute("SELECT id,name,status,holder_id,holder_name,floor,due_at FROM tools ORDER BY name COLLATE NOCASE").fetchall()
-        staff=c.execute("SELECT telegram_id,name FROM users ORDER BY name COLLATE NOCASE").fetchall()
+        staff=c.execute("SELECT telegram_id,name,username FROM users ORDER BY name COLLATE NOCASE").fetchall()
         journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 50").fetchall()
         incoming=c.execute("SELECT id,tool_id,tool_name,sender_id,sender_name,created_at FROM transfer_requests WHERE recipient_id=? AND status='pending' ORDER BY id DESC",(uid,)).fetchall()
         consumables=c.execute("SELECT id,name,unit,quantity,min_quantity,updated_at FROM consumables ORDER BY name COLLATE NOCASE").fetchall()
@@ -817,7 +823,7 @@ async def api_state(request):
         locations=c.execute("SELECT l.telegram_id,u.name,l.latitude,l.longitude,l.accuracy,l.updated_at FROM staff_locations l JOIN users u ON u.telegram_id=l.telegram_id ORDER BY l.updated_at DESC").fetchall() if user and is_admin_name(user[0]) else []
         site_notes=c.execute("SELECT id,area,note,created_by_name,status,created_at,resolved_by,resolved_at FROM site_notes ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,id DESC LIMIT 100").fetchall()
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1],"username":p[2]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes]})
 
 async def api_site_note_add(request):
     uid=int(request["tg_user"]["id"])
@@ -990,11 +996,11 @@ async def api_staff_history(request):
     try: staff_id = int(request.match_info["staff_id"])
     except (TypeError, ValueError): return web.json_response({"error":"Некорректный сотрудник"},status=400)
     with db_connect() as c:
-        person=c.execute("SELECT telegram_id,name FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
+        person=c.execute("SELECT telegram_id,name,username FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
         if not person: return web.json_response({"error":"Сотрудник не найден"},status=404)
         rows=c.execute("SELECT tool_name,action,floor,created_at FROM journal WHERE user_id=? ORDER BY id DESC LIMIT 50",(staff_id,)).fetchall()
         assigned=c.execute("SELECT id,name,floor,due_at FROM tools WHERE holder_id=? AND status='issued' ORDER BY name COLLATE NOCASE",(staff_id,)).fetchall()
-    return web.json_response({"staff":{"id":person[0],"name":person[1]},
+    return web.json_response({"staff":{"id":person[0],"name":person[1],"username":person[2]},
         "tools":[{"id":r[0],"name":r[1],"floor":r[2],"due_at":r[3]} for r in assigned],
         "history":[{"tool":r[0],"action":r[1],"floor":r[2],"time":r[3]} for r in rows]})
 
