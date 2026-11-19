@@ -66,6 +66,15 @@ def db_connect():
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staff_tasks_staff ON staff_tasks(staff_id, status, id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS task_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        staff_id INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id, id)")
     # Предварительный список сотрудников без Telegram-привязки.
     # Отрицательные ID зарезервированы для записей-черновиков и не являются Telegram ID.
     preset_staff = [
@@ -932,8 +941,11 @@ async def api_state(request):
         locations=c.execute("SELECT l.telegram_id,u.name,l.latitude,l.longitude,l.accuracy,l.updated_at,u.username FROM staff_locations l JOIN users u ON u.telegram_id=l.telegram_id ORDER BY l.updated_at DESC").fetchall() if user and is_admin_name(user[0]) else []
         site_notes=c.execute("SELECT id,area,note,created_by_name,status,created_at,resolved_by,resolved_at FROM site_notes ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,id DESC LIMIT 100").fetchall()
         task_rows=c.execute("SELECT t.id,t.staff_id,u.name,t.title,t.description,t.due_date,t.status,t.created_at,t.completed_at FROM staff_tasks t JOIN users u ON u.telegram_id=t.staff_id "+("ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC" if user and is_admin_name(user[0]) else "WHERE t.staff_id=? ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC"),(() if user and is_admin_name(user[0]) else (uid,))).fetchall()
+        task_attachments=c.execute("SELECT a.task_id,a.url,a.name,a.created_at FROM task_attachments a JOIN staff_tasks t ON t.id=a.task_id "+("" if user and is_admin_name(user[0]) else "WHERE t.staff_id=?")+" ORDER BY a.id",(() if user and is_admin_name(user[0]) else (uid,))).fetchall()
+    attachments_by_task={}
+    for a in task_attachments: attachments_by_task.setdefault(a[0],[]).append({"url":a[1],"name":a[2],"created_at":a[3]})
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1],"username":p[2]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes],"tasks":[{"id":r[0],"staff_id":r[1],"staff_name":r[2],"title":r[3],"description":r[4],"due_date":r[5],"status":r[6],"created_at":r[7],"completed_at":r[8]} for r in task_rows]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1],"username":p[2]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes],"tasks":[{"id":r[0],"staff_id":r[1],"staff_name":r[2],"title":r[3],"description":r[4],"due_date":r[5],"status":r[6],"created_at":r[7],"completed_at":r[8],"attachments":attachments_by_task.get(r[0],[])} for r in task_rows]})
 
 async def api_site_note_add(request):
     uid=int(request["tg_user"]["id"])
@@ -1111,9 +1123,12 @@ async def api_staff_history(request):
         rows=c.execute("SELECT tool_name,action,floor,created_at FROM journal WHERE user_id=? ORDER BY id DESC LIMIT 50",(staff_id,)).fetchall()
         assigned=c.execute("SELECT id,name,floor,due_at FROM tools WHERE holder_id=? AND status='issued' ORDER BY name COLLATE NOCASE",(staff_id,)).fetchall()
         tasks=c.execute("SELECT id,title,description,due_date,status,created_at,completed_at FROM staff_tasks WHERE staff_id=? ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,id DESC",(staff_id,)).fetchall()
+        attachments=c.execute("SELECT task_id,url,name,created_at FROM task_attachments WHERE task_id IN (SELECT id FROM staff_tasks WHERE staff_id=?) ORDER BY id",(staff_id,)).fetchall()
+    attachments_by_task={}
+    for a in attachments: attachments_by_task.setdefault(a[0],[]).append({"url":a[1],"name":a[2],"created_at":a[3]})
     return web.json_response({"staff":{"id":person[0],"name":person[1],"username":person[2]},
         "tools":[{"id":r[0],"name":r[1],"floor":r[2],"due_at":r[3]} for r in assigned],
-        "tasks":[{"id":r[0],"title":r[1],"description":r[2],"due_date":r[3],"status":r[4],"created_at":r[5],"completed_at":r[6]} for r in tasks],
+        "tasks":[{"id":r[0],"title":r[1],"description":r[2],"due_date":r[3],"status":r[4],"created_at":r[5],"completed_at":r[6],"attachments":attachments_by_task.get(r[0],[])} for r in tasks],
         "history":[{"tool":r[0],"action":r[1],"floor":r[2],"time":r[3]} for r in rows]})
 
 
@@ -1151,6 +1166,69 @@ async def api_task_complete(request):
             return web.json_response({"error":"Можно отмечать только свои задачи"},status=403)
         c.execute("UPDATE staff_tasks SET status=?,completed_at=? WHERE id=?",("done" if completed else "open",now_text() if completed else None,task_id))
     return web.json_response({"ok":True})
+
+
+async def api_task_upload(request):
+    uid=int(request["tg_user"]["id"])
+    user=get_user(uid)
+    if not user:
+        return web.json_response({"error":"Сначала зарегистрируйся в профиле"},status=403)
+    try:
+        reader=await request.multipart()
+        fields={}
+        file_field=None
+        while True:
+            part=await reader.next()
+            if part is None: break
+            if part.name=="file": file_field=part
+            elif part.name=="task_id": fields["task_id"]=await part.text()
+        try: task_id=int(fields.get("task_id"))
+        except (TypeError,ValueError): return web.json_response({"error":"Задача не выбрана"},status=400)
+        with db_connect() as c:
+            task=c.execute("SELECT staff_id FROM staff_tasks WHERE id=?",(task_id,)).fetchone()
+            if not task: return web.json_response({"error":"Задача не найдена"},status=404)
+            if int(task[0])!=uid and not is_admin_user(uid):
+                return web.json_response({"error":"Можно прикреплять фото только к своим задачам"},status=403)
+            count=c.execute("SELECT COUNT(*) FROM task_attachments WHERE task_id=?",(task_id,)).fetchone()[0]
+        if count>=5: return web.json_response({"error":"К одной задаче можно прикрепить не больше 5 фотографий"},status=400)
+        if file_field is None: return web.json_response({"error":"Выбери фотографию"},status=400)
+        content_type=(file_field.headers.get("Content-Type") or "").lower()
+        allowed={"image/jpeg":".jpg","image/png":".png","image/webp":".webp"}
+        if content_type not in allowed:
+            return web.json_response({"error":"Поддерживаются JPG, PNG и WEBP"},status=415)
+        folder=Path(os.getenv("TASK_UPLOAD_DIR","/data/task_uploads"))
+        folder.mkdir(parents=True,exist_ok=True)
+        filename=uuid.uuid4().hex+allowed[content_type]
+        target=folder/filename
+        size=0
+        with target.open("wb") as out:
+            while True:
+                chunk=await file_field.read_chunk(64*1024)
+                if not chunk: break
+                size+=len(chunk)
+                if size>8*1024*1024:
+                    out.close(); target.unlink(missing_ok=True)
+                    return web.json_response({"error":"Максимальный размер фото — 8 МБ"},status=413)
+                out.write(chunk)
+        if size==0:
+            target.unlink(missing_ok=True)
+            return web.json_response({"error":"Фотография пустая"},status=400)
+        original=Path(file_field.filename or "Фото").name[:180]
+        url="/task-files/"+filename
+        with db_connect() as c:
+            c.execute("INSERT INTO task_attachments (task_id,staff_id,url,name,created_at) VALUES (?,?,?,?,?)",(task_id,uid,url,original,now_text()))
+        return web.json_response({"ok":True,"url":url,"name":original})
+    except Exception:
+        return web.json_response({"error":"Не удалось загрузить фотографию"},status=400)
+
+
+async def app_task_file(request):
+    filename=request.match_info.get("filename","")
+    if not filename or Path(filename).name!=filename or not filename.replace(".","").isalnum():
+        raise web.HTTPNotFound()
+    path=Path(os.getenv("TASK_UPLOAD_DIR","/data/task_uploads"))/filename
+    if not path.is_file(): raise web.HTTPNotFound()
+    return web.FileResponse(path,headers={"X-Content-Type-Options":"nosniff","Cache-Control":"public, max-age=31536000"})
 
 
 async def api_task_delete(request):
@@ -1402,7 +1480,7 @@ async def api_transfer(request):
 
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth], client_max_size=9 * 1024 * 1024); app["bot"]=bot
-    app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_post("/api/tasks/create",api_task_create); app.router.add_post("/api/tasks/complete",api_task_complete); app.router.add_post("/api/tasks/delete",api_task_delete); app.router.add_get("/api/inventory",api_inventory_summary)
+    app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/task-files/{filename}",app_task_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_post("/api/tasks/create",api_task_create); app.router.add_post("/api/tasks/complete",api_task_complete); app.router.add_post("/api/tasks/upload",api_task_upload); app.router.add_post("/api/tasks/delete",api_task_delete); app.router.add_get("/api/inventory",api_inventory_summary)
     app.router.add_post("/api/consumables",api_add_consumable); app.router.add_post("/api/consumables/update",api_update_consumable); app.router.add_post("/api/consumables/request",api_request_consumable); app.router.add_post("/api/consumables/respond",api_respond_consumable_request)
     app.router.add_post("/api/register",api_register); app.router.add_post("/api/chat/upload",api_chat_upload); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/site-notes",api_site_note_add); app.router.add_post("/api/site-notes/resolve",api_site_note_resolve); app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
