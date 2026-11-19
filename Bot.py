@@ -465,6 +465,13 @@ async def register_chat_notification_group(message: Message):
         )
     await message.answer("✅ Эта группа подключена к уведомлениям ToolSite. Теперь новые сообщения из общего чата будут приходить сюда.")
 
+@dp.message(Command("myid"), F.chat.type == "private")
+async def show_my_telegram_id(message: Message):
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "не задан"
+    await message.answer(f"Твой Telegram ID: `{user.id}`\\nUsername: {username}", parse_mode="Markdown")
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
     pending.pop(message.from_user.id, None)
