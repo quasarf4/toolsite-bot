@@ -113,6 +113,29 @@ def db_connect():
         )
         conn.execute("INSERT INTO security_migrations (name,applied_at) VALUES (?,?)", (admin_migration, now_text()))
 
+    # Убираем только старую незарегистрированную карточку-черновик Амира,
+    # если подтверждённая учётная запись владельца уже существует.
+    cleanup_migration = "remove_amir_placeholder_duplicate_599302909_v1"
+    if not conn.execute("SELECT 1 FROM security_migrations WHERE name=?", (cleanup_migration,)).fetchone():
+        owner = conn.execute("SELECT 1 FROM users WHERE telegram_id=? AND lower(trim(name))='амир'", (599302909,)).fetchone()
+        if owner:
+            placeholders = conn.execute("SELECT telegram_id FROM users WHERE telegram_id<0 AND lower(trim(name))='амир'").fetchall()
+            for (old_id,) in placeholders:
+                for table, column in (
+                    ("tools","holder_id"), ("journal","user_id"),
+                    ("transfer_requests","sender_id"), ("transfer_requests","recipient_id"),
+                    ("staff_locations","telegram_id"), ("consumable_requests","requested_by"),
+                    ("site_notes","created_by"), ("chat_messages","user_id"),
+                    ("inventory_sessions","created_by"), ("staff_tasks","staff_id"),
+                ):
+                    try:
+                        conn.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?", (599302909, old_id))
+                    except sqlite3.OperationalError:
+                        pass
+                conn.execute("DELETE FROM staff_invites WHERE staff_id=?", (old_id,))
+                conn.execute("DELETE FROM users WHERE telegram_id=?", (old_id,))
+        conn.execute("INSERT INTO security_migrations (name,applied_at) VALUES (?,?)", (cleanup_migration, now_text()))
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS staff_invites (
             staff_id INTEGER PRIMARY KEY,
@@ -1234,8 +1257,8 @@ async def api_staff_history(request):
     try: staff_id = int(request.match_info["staff_id"])
     except (TypeError, ValueError): return web.json_response({"error":"Некорректный сотрудник"},status=400)
     requester_id = int(request["tg_user"]["id"])
-    if requester_id != staff_id and not is_admin_user(requester_id):
-        return web.json_response({"error":"Просматривать карточки других сотрудников могут только администраторы"},status=403)
+    # Все зарегистрированные сотрудники могут просматривать карточки коллег.
+    # Изменять задачи и выполнять административные действия по-прежнему могут только администраторы.
     with db_connect() as c:
         person=c.execute("SELECT telegram_id,name,username FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
         if not person: return web.json_response({"error":"Сотрудник не найден"},status=404)
