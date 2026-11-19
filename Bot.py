@@ -355,7 +355,7 @@ async def start(message: Message):
                     ("transfer_requests","sender_id"), ("transfer_requests","recipient_id"),
                     ("staff_locations","telegram_id"), ("consumable_requests","requested_by"),
                     ("site_notes","created_by"), ("chat_messages","user_id"),
-                    ("inventory_sessions","created_by"),
+                    ("inventory_sessions","created_by"), ("staff_tasks","staff_id"),
                 ):
                     try:
                         c.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?", (uid,staff_id))
