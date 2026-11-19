@@ -309,6 +309,47 @@ async def send_staff_invites(message: Message):
             lines.append(f"\n{name}: https://t.me/{bot_info.username}?start={token}")
     await message.answer("\n".join(lines), disable_web_page_preview=True)
 
+@dp.message(Command("reinvite"), F.chat.type == "private")
+async def rotate_staff_invite(message: Message):
+    if not is_admin_user(message.from_user.id):
+        await message.answer("❌ Обновлять приглашения могут только администраторы Эмом и Амир.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Укажи имя сотрудника: /reinvite Эмом")
+        return
+    name = " ".join(parts[1].strip().split())
+    with db_connect() as c:
+        staff = c.execute(
+            "SELECT telegram_id,name FROM users WHERE telegram_id<0 AND name=? COLLATE NOCASE",
+            (name,)
+        ).fetchone()
+        if not staff:
+            await message.answer("❌ Не найден незарегистрированный сотрудник с таким именем.")
+            return
+        staff_id, staff_name = staff
+        token = secrets.token_urlsafe(24)
+        existing = c.execute(
+            "SELECT 1 FROM staff_invites WHERE staff_id=?", (staff_id,)
+        ).fetchone()
+        if existing:
+            c.execute(
+                "UPDATE staff_invites SET token=?,claimed_by=NULL,created_at=?,claimed_at=NULL WHERE staff_id=?",
+                (token, now_text(), staff_id)
+            )
+        else:
+            c.execute(
+                "INSERT INTO staff_invites (staff_id,token,created_at) VALUES (?,?,?)",
+                (staff_id, token, now_text())
+            )
+    bot_info = await message.bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={token}"
+    await message.answer(
+        f"🔐 Новая ссылка для {staff_name}:\n{link}\n\nПредыдущая ссылка больше не действует.",
+        disable_web_page_preview=True
+    )
+
+
 @dp.message(Command("chat_notify"), F.chat.type.in_({"group", "supergroup"}))
 async def register_chat_notification_group(message: Message):
     with db_connect() as c:
