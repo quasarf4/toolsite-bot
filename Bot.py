@@ -465,6 +465,42 @@ async def register_chat_notification_group(message: Message):
         )
     await message.answer("✅ Эта группа подключена к уведомлениям ToolSite. Теперь новые сообщения из общего чата будут приходить сюда.")
 
+@dp.message(Command("claim_amir"), F.chat.type == "private")
+async def claim_amir_account(message: Message):
+    uid = message.from_user.id
+    username = (message.from_user.username or "").casefold()
+    if uid != 599302909 or username != "quasar_f4":
+        await message.answer("❌ Эта привязка разрешена только подтверждённому аккаунту Амира.")
+        return
+    with db_connect() as c:
+        current = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        if current and current[0].strip().casefold() != "амир":
+            await message.answer("❌ Этот Telegram ID уже закреплён за другой учётной записью. Нужна ручная проверка.")
+            return
+        placeholder = c.execute("SELECT telegram_id FROM users WHERE telegram_id<0 AND name=? COLLATE NOCASE", ("Амир",)).fetchone()
+        if not current and not placeholder:
+            await message.answer("❌ Не найдена свободная карточка «Амир». Ничего не изменено.")
+            return
+        if not current:
+            old_id = placeholder[0]
+            for table, column in (
+                ("tools","holder_id"), ("journal","user_id"),
+                ("transfer_requests","sender_id"), ("transfer_requests","recipient_id"),
+                ("staff_locations","telegram_id"), ("consumable_requests","requested_by"),
+                ("site_notes","created_by"), ("chat_messages","user_id"),
+                ("inventory_sessions","created_by"), ("staff_tasks","staff_id"),
+            ):
+                try:
+                    c.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?", (uid, old_id))
+                except sqlite3.OperationalError:
+                    pass
+            c.execute("UPDATE users SET telegram_id=?,username=? WHERE telegram_id=?", (uid, "quasar_f4", old_id))
+        else:
+            c.execute("UPDATE users SET username=? WHERE telegram_id=?", ("quasar_f4", uid))
+        c.execute("INSERT OR IGNORE INTO admin_accounts (telegram_id,created_at) VALUES (?,?)", (uid, now_text()))
+    await message.answer("✅ Аккаунт @quasar_f4 закреплён за сотрудником «Амир». Права администратора включены.")
+
+
 @dp.message(Command("myid"), F.chat.type == "private")
 async def show_my_telegram_id(message: Message):
     user = message.from_user
