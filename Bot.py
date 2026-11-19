@@ -1175,14 +1175,10 @@ async def api_task_upload(request):
         return web.json_response({"error":"Сначала зарегистрируйся в профиле"},status=403)
     try:
         reader=await request.multipart()
-        fields={}
-        file_field=None
-        while True:
-            part=await reader.next()
-            if part is None: break
-            if part.name=="file": file_field=part
-            elif part.name=="task_id": fields["task_id"]=await part.text()
-        try: task_id=int(fields.get("task_id"))
+        task_part=await reader.next()
+        if task_part is None or task_part.name!="task_id":
+            return web.json_response({"error":"Задача не выбрана"},status=400)
+        try: task_id=int(await task_part.text())
         except (TypeError,ValueError): return web.json_response({"error":"Задача не выбрана"},status=400)
         with db_connect() as c:
             task=c.execute("SELECT staff_id FROM staff_tasks WHERE id=?",(task_id,)).fetchone()
@@ -1191,7 +1187,9 @@ async def api_task_upload(request):
                 return web.json_response({"error":"Можно прикреплять фото только к своим задачам"},status=403)
             count=c.execute("SELECT COUNT(*) FROM task_attachments WHERE task_id=?",(task_id,)).fetchone()[0]
         if count>=5: return web.json_response({"error":"К одной задаче можно прикрепить не больше 5 фотографий"},status=400)
-        if file_field is None: return web.json_response({"error":"Выбери фотографию"},status=400)
+        file_field=await reader.next()
+        if file_field is None or file_field.name!="file":
+            return web.json_response({"error":"Выбери фотографию"},status=400)
         content_type=(file_field.headers.get("Content-Type") or "").lower()
         allowed={"image/jpeg":".jpg","image/png":".png","image/webp":".webp"}
         if content_type not in allowed:
@@ -1220,7 +1218,6 @@ async def api_task_upload(request):
         return web.json_response({"ok":True,"url":url,"name":original})
     except Exception:
         return web.json_response({"error":"Не удалось загрузить фотографию"},status=400)
-
 
 async def app_task_file(request):
     filename=request.match_info.get("filename","")
