@@ -1562,12 +1562,22 @@ async def daily_task_report_loop(bot):
                 total=sum(len(v) for v in by_staff.values())
                 completed=sum(1 for v in by_staff.values() for t in v if t["status"]=="done")
                 lines.append(f"<b>ИТОГО:</b> {completed} из {total} задач выполнено.")
-                report_text="\n".join(lines)
+                report_chunks=[]
+                current=[]
+                for line in lines:
+                    candidate="\n".join(current+[line])
+                    if len(candidate)>3800 and current:
+                        report_chunks.append("\n".join(current))
+                        current=[line]
+                    else:
+                        current.append(line)
+                if current: report_chunks.append("\n".join(current))
                 recipients={int(x[0]) for x in groups}
                 recipients.update(int(x[0]) for x in admins)
                 for chat_id in sorted(recipients-delivered):
                     try:
-                        await bot.send_message(chat_id,report_text,parse_mode="HTML",disable_web_page_preview=True)
+                        for report_chunk in report_chunks:
+                            await bot.send_message(chat_id,report_chunk,parse_mode="HTML",disable_web_page_preview=True)
                         for uid,name in users:
                             for task in by_staff.get(int(uid),[]):
                                 attachments=photos_by_task.get(task["id"],[])
