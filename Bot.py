@@ -54,24 +54,6 @@ def db_connect():
     user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "username" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
-    conn.execute("""CREATE TABLE IF NOT EXISTS admin_accounts (
-        telegram_id INTEGER PRIMARY KEY,
-        created_at TEXT NOT NULL
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS security_migrations (
-        name TEXT PRIMARY KEY,
-        applied_at TEXT NOT NULL
-    )""")
-    admin_migration = "lock_admins_to_telegram_ids_v1"
-    if not conn.execute("SELECT 1 FROM security_migrations WHERE name=?", (admin_migration,)).fetchone():
-        current_admins = conn.execute(
-            "SELECT telegram_id FROM users WHERE telegram_id>0 AND lower(trim(name)) IN ('эмом','амир')"
-        ).fetchall()
-        conn.executemany(
-            "INSERT OR IGNORE INTO admin_accounts (telegram_id,created_at) VALUES (?,?)",
-            [(row[0], now_text()) for row in current_admins]
-        )
-        conn.execute("INSERT INTO security_migrations (name,applied_at) VALUES (?,?)", (admin_migration, now_text()))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS staff_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +93,25 @@ def db_connect():
         exists = conn.execute("SELECT 1 FROM users WHERE name=? COLLATE NOCASE LIMIT 1", (name,)).fetchone()
         if not exists:
             conn.execute("INSERT INTO users (telegram_id, name, created_at) VALUES (?, ?, ?)", (-10001 - i, name, now_text()))
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS admin_accounts (
+        telegram_id INTEGER PRIMARY KEY,
+        created_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS security_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+    )""")
+    admin_migration = "lock_admins_to_telegram_ids_v1"
+    if not conn.execute("SELECT 1 FROM security_migrations WHERE name=?", (admin_migration,)).fetchone():
+        current_admins = conn.execute(
+            "SELECT telegram_id FROM users WHERE telegram_id>0 AND lower(trim(name)) IN ('эмом','амир')"
+        ).fetchall()
+        conn.executemany(
+            "INSERT OR IGNORE INTO admin_accounts (telegram_id,created_at) VALUES (?,?)",
+            [(row[0], now_text()) for row in current_admins]
+        )
+        conn.execute("INSERT INTO security_migrations (name,applied_at) VALUES (?,?)", (admin_migration, now_text()))
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS staff_invites (
@@ -995,7 +996,7 @@ async def app_map_image(request):
     })
 
 async def api_state(request):
-    tg=request["tg_user"]; uid=int(tg["id"])
+    tg=request["tg_user"]; uid=int(tg["id"]); admin=is_admin_user(uid)
     with db_connect() as c:
         username=str(tg.get("username") or "").strip().lstrip("@") or None
         if username:
@@ -1006,18 +1007,18 @@ async def api_state(request):
         journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 50").fetchall()
         incoming=c.execute("SELECT id,tool_id,tool_name,sender_id,sender_name,created_at FROM transfer_requests WHERE recipient_id=? AND status='pending' ORDER BY id DESC",(uid,)).fetchall()
         consumables=c.execute("SELECT id,name,unit,quantity,min_quantity,updated_at FROM consumables ORDER BY name COLLATE NOCASE").fetchall()
-        if user and is_admin_name(user[0]):
+        if admin:
             consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE status='pending' ORDER BY id DESC LIMIT 100").fetchall()
         else:
             consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE requested_by=? ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
-        locations=c.execute("SELECT l.telegram_id,u.name,l.latitude,l.longitude,l.accuracy,l.updated_at,u.username FROM staff_locations l JOIN users u ON u.telegram_id=l.telegram_id ORDER BY l.updated_at DESC").fetchall() if user and is_admin_name(user[0]) else []
+        locations=c.execute("SELECT l.telegram_id,u.name,l.latitude,l.longitude,l.accuracy,l.updated_at,u.username FROM staff_locations l JOIN users u ON u.telegram_id=l.telegram_id ORDER BY l.updated_at DESC").fetchall() if admin else []
         site_notes=c.execute("SELECT id,area,note,created_by_name,status,created_at,resolved_by,resolved_at FROM site_notes ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,id DESC LIMIT 100").fetchall()
-        task_rows=c.execute("SELECT t.id,t.staff_id,u.name,t.title,t.description,t.due_date,t.status,t.created_at,t.completed_at FROM staff_tasks t JOIN users u ON u.telegram_id=t.staff_id "+("ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC" if user and is_admin_name(user[0]) else "WHERE t.staff_id=? ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC"),(() if user and is_admin_name(user[0]) else (uid,))).fetchall()
-        task_attachments=c.execute("SELECT a.task_id,a.url,a.name,a.created_at FROM task_attachments a JOIN staff_tasks t ON t.id=a.task_id "+("" if user and is_admin_name(user[0]) else "WHERE t.staff_id=?")+" ORDER BY a.id",(() if user and is_admin_name(user[0]) else (uid,))).fetchall()
+        task_rows=c.execute("SELECT t.id,t.staff_id,u.name,t.title,t.description,t.due_date,t.status,t.created_at,t.completed_at FROM staff_tasks t JOIN users u ON u.telegram_id=t.staff_id "+("ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC" if admin else "WHERE t.staff_id=? ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC"),(() if admin else (uid,))).fetchall()
+        task_attachments=c.execute("SELECT a.task_id,a.url,a.name,a.created_at FROM task_attachments a JOIN staff_tasks t ON t.id=a.task_id "+("" if admin else "WHERE t.staff_id=?")+" ORDER BY a.id",(() if admin else (uid,))).fetchall()
     attachments_by_task={}
     for a in task_attachments: attachments_by_task.setdefault(a[0],[]).append({"url":a[1],"name":a[2],"created_at":a[3]})
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(user and is_admin_name(user[0])),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1],"username":p[2]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes],"tasks":[{"id":r[0],"staff_id":r[1],"staff_name":r[2],"title":r[3],"description":r[4],"due_date":r[5],"status":r[6],"created_at":r[7],"completed_at":r[8],"attachments":attachments_by_task.get(r[0],[])} for r in task_rows]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(admin),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1],"username":p[2]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes],"tasks":[{"id":r[0],"staff_id":r[1],"staff_name":r[2],"title":r[3],"description":r[4],"due_date":r[5],"status":r[6],"created_at":r[7],"completed_at":r[8],"attachments":attachments_by_task.get(r[0],[])} for r in task_rows]})
 
 async def api_site_note_add(request):
     uid=int(request["tg_user"]["id"])
