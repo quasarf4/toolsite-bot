@@ -5,6 +5,7 @@ import hmac, hashlib, json
 import uuid
 import secrets
 import html
+import time
 from pathlib import Path
 from urllib.parse import parse_qsl
 from datetime import datetime, timezone
@@ -53,6 +54,24 @@ def db_connect():
     user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "username" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+    conn.execute("""CREATE TABLE IF NOT EXISTS admin_accounts (
+        telegram_id INTEGER PRIMARY KEY,
+        created_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS security_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+    )""")
+    admin_migration = "lock_admins_to_telegram_ids_v1"
+    if not conn.execute("SELECT 1 FROM security_migrations WHERE name=?", (admin_migration,)).fetchone():
+        current_admins = conn.execute(
+            "SELECT telegram_id FROM users WHERE telegram_id>0 AND lower(trim(name)) IN ('эмом','амир')"
+        ).fetchall()
+        conn.executemany(
+            "INSERT OR IGNORE INTO admin_accounts (telegram_id,created_at) VALUES (?,?)",
+            [(row[0], now_text()) for row in current_admins]
+        )
+        conn.execute("INSERT INTO security_migrations (name,applied_at) VALUES (?,?)", (admin_migration, now_text()))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS staff_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,8 +316,16 @@ def is_admin_name(name):
 
 
 def is_admin_user(telegram_id):
-    user = get_user(telegram_id)
-    return bool(user and is_admin_name(user[0]))
+    try:
+        uid = int(telegram_id)
+    except (TypeError, ValueError):
+        return False
+    if uid <= 0:
+        return False
+    with db_connect() as conn:
+        return bool(conn.execute(
+            "SELECT 1 FROM admin_accounts WHERE telegram_id=?", (uid,)
+        ).fetchone())
 
 
 @dp.message(Command("invites"), F.chat.type == "private")
@@ -307,7 +334,7 @@ async def send_staff_invites(message: Message):
         await message.answer("❌ Создавать приглашения могут только администраторы Эмом и Амир.")
         return
     with db_connect() as c:
-        placeholders = c.execute("SELECT telegram_id,name FROM users WHERE telegram_id<0 ORDER BY name COLLATE NOCASE").fetchall()
+        placeholders = c.execute("SELECT telegram_id,name FROM users WHERE telegram_id<0 AND lower(trim(name)) NOT IN ('эмом','амир') ORDER BY name COLLATE NOCASE").fetchall()
         for staff_id, _name in placeholders:
             existing = c.execute("SELECT token FROM staff_invites WHERE staff_id=?", (staff_id,)).fetchone()
             if not existing:
@@ -335,6 +362,9 @@ async def rotate_staff_invite(message: Message):
         await message.answer("Укажи имя сотрудника: /reinvite Эмом")
         return
     name = " ".join(parts[1].strip().split())
+    if name.casefold() in {"эмом", "амир"}:
+        await message.answer("❌ Для администраторов нельзя создавать обычные приглашения. Их доступ закреплён за Telegram ID.")
+        return
     with db_connect() as c:
         staff = c.execute(
             "SELECT telegram_id,name FROM users WHERE telegram_id<0 AND name=? COLLATE NOCASE",
@@ -377,6 +407,8 @@ async def reset_staff_account(message: Message):
         return
 
     staff_name = "Эмом"
+    await message.answer("❌ Сброс записи администратора этой командой запрещён: это может заблокировать доступ. Для смены Telegram-аккаунта администратора нужна отдельная безопасная процедура.")
+    return
     with db_connect() as c:
         old_ids = [row[0] for row in c.execute(
             "SELECT telegram_id FROM users WHERE name=? COLLATE NOCASE", (staff_name,)
@@ -422,6 +454,9 @@ async def reset_staff_account(message: Message):
 
 @dp.message(Command("chat_notify"), F.chat.type.in_({"group", "supergroup"}))
 async def register_chat_notification_group(message: Message):
+    if not is_admin_user(message.from_user.id):
+        await message.answer("❌ Подключать группы к уведомлениям могут только администраторы.")
+        return
     with db_connect() as c:
         c.execute(
             "INSERT OR REPLACE INTO chat_notification_groups (chat_id,title,added_at) VALUES (?,?,?)",
@@ -444,6 +479,11 @@ async def start(message: Message):
             staff_id, claimed_by = invite
             current = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
             target = c.execute("SELECT name FROM users WHERE telegram_id=?", (staff_id,)).fetchone()
+            if target and target[0].strip().casefold() in {"эмом", "амир"} and uid not in {
+                row[0] for row in c.execute("SELECT telegram_id FROM admin_accounts").fetchall()
+            }:
+                await message.answer("❌ Приглашение администратора нельзя активировать как обычный сотрудник. Обратись к действующему администратору.")
+                return
             if claimed_by and int(claimed_by) != uid:
                 await message.answer("❌ Это приглашение уже использовано другим Telegram-аккаунтом. Обратись к администратору.")
                 return
@@ -893,23 +933,48 @@ async def show_map(callback: CallbackQuery):
 
 def validate_init_data(init_data, bot_token):
     try:
-        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        parsed = parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+        if not parsed or len({key for key, _ in parsed}) != len(parsed):
+            return None
+        pairs = dict(parsed)
         received_hash = pairs.pop("hash", None)
-        if not received_hash: return None
+        if not received_hash or not bot_token:
+            return None
         check = "\n".join(f"{k}={v}" for k,v in sorted(pairs.items()))
         secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-        if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), received_hash): return None
-        if abs(datetime.now(timezone.utc).timestamp()-int(pairs.get("auth_date","0"))) > 86400: return None
+        expected = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, received_hash):
+            return None
+        auth_date = int(pairs.get("auth_date", "0"))
+        age = datetime.now(timezone.utc).timestamp() - auth_date
+        if age < -60 or age > 43200:
+            return None
         user = json.loads(pairs.get("user","{}"))
         return user if user.get("id") else None
     except Exception:
         return None
 
+API_RATE_LIMITS = {}
+
 @web.middleware
 async def api_auth(request, handler):
     if request.path.startswith("/api/"):
         user = validate_init_data(request.headers.get("X-Telegram-Init-Data",""), os.getenv("BOT_TOKEN",""))
-        if not user: return web.json_response({"error":"Открой приложение через Telegram"},status=401)
+        if not user:
+            return web.json_response({"error":"Открой приложение через Telegram заново"},status=401)
+        uid = int(user["id"])
+        now = time.monotonic()
+        bucket = API_RATE_LIMITS.get(uid)
+        if bucket is None or now - bucket[0] >= 60:
+            API_RATE_LIMITS[uid] = (now, 1)
+        else:
+            if bucket[1] >= 180:
+                return web.json_response({"error":"Слишком много запросов. Подожди минуту."},status=429)
+            API_RATE_LIMITS[uid] = (bucket[0], bucket[1] + 1)
+        if len(API_RATE_LIMITS) > 5000:
+            API_RATE_LIMITS.clear()
+        if not get_user(uid):
+            return web.json_response({"error":"Нет доступа. Используй персональное приглашение администратора."},status=403)
         request["tg_user"] = user
     return await handler(request)
 
@@ -1124,6 +1189,9 @@ async def api_tool_history(request):
 async def api_staff_history(request):
     try: staff_id = int(request.match_info["staff_id"])
     except (TypeError, ValueError): return web.json_response({"error":"Некорректный сотрудник"},status=400)
+    requester_id = int(request["tg_user"]["id"])
+    if requester_id != staff_id and not is_admin_user(requester_id):
+        return web.json_response({"error":"Просматривать карточки других сотрудников могут только администраторы"},status=403)
     with db_connect() as c:
         person=c.execute("SELECT telegram_id,name,username FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
         if not person: return web.json_response({"error":"Сотрудник не найден"},status=404)
