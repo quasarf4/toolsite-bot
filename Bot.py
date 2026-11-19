@@ -4,6 +4,7 @@ import sqlite3
 import hmac, hashlib, json
 import uuid
 import secrets
+import html
 from pathlib import Path
 from urllib.parse import parse_qsl
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, FSInputFile, InputMediaPhoto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 dp = Dispatcher()
@@ -75,6 +76,12 @@ def db_connect():
         created_at TEXT NOT NULL
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id, id)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS daily_task_report_deliveries (
+        report_date TEXT NOT NULL,
+        chat_id INTEGER NOT NULL,
+        sent_at TEXT NOT NULL,
+        PRIMARY KEY(report_date,chat_id)
+    )""")
     # Предварительный список сотрудников без Telegram-привязки.
     # Отрицательные ID зарезервированы для записей-черновиков и не являются Telegram ID.
     preset_staff = [
@@ -1505,6 +1512,88 @@ async def reminder_loop(bot):
         await asyncio.sleep(3600)
 
 
+async def daily_task_report_loop(bot):
+    tz = ZoneInfo("Europe/Moscow")
+    while True:
+        try:
+            now = datetime.now(tz)
+            report_date = now.date().isoformat()
+            if now.hour >= 17:
+                with db_connect() as c:
+                    users = c.execute("SELECT telegram_id,name FROM users WHERE telegram_id>0 ORDER BY name COLLATE NOCASE").fetchall()
+                    task_rows = c.execute("""SELECT t.id,t.staff_id,t.title,t.description,t.status,t.created_at,t.completed_at
+                                             FROM staff_tasks t JOIN users u ON u.telegram_id=t.staff_id
+                                             WHERE t.status='open' OR t.completed_at IS NOT NULL OR t.created_at IS NOT NULL
+                                             ORDER BY u.name COLLATE NOCASE,t.id""").fetchall()
+                    attachment_rows = c.execute("""SELECT a.task_id,a.url,a.name FROM task_attachments a
+                                                   JOIN staff_tasks t ON t.id=a.task_id
+                                                   ORDER BY a.id""").fetchall()
+                    groups = c.execute("SELECT chat_id FROM chat_notification_groups").fetchall()
+                    admins = c.execute("SELECT telegram_id FROM users WHERE telegram_id>0 AND lower(name) IN ('эмом','амир')").fetchall()
+                    delivered = {int(row[0]) for row in c.execute("SELECT chat_id FROM daily_task_report_deliveries WHERE report_date=?",(report_date,)).fetchall()}
+                by_staff = {int(uid): [] for uid,_ in users}
+                for row in task_rows:
+                    tid, sid, title, description, status, created_at, completed_at = row
+                    sid=int(sid)
+                    if sid not in by_staff: continue
+                    def is_today(value):
+                        if not value: return False
+                        try: return datetime.fromisoformat(str(value).replace("Z","+00:00")).astimezone(tz).date().isoformat()==report_date
+                        except Exception: return str(value)[:10]==report_date
+                    if status=="open" or is_today(completed_at) or is_today(created_at):
+                        by_staff[sid].append({"id":int(tid),"title":title,"description":description,"status":status,"completed_at":completed_at})
+                photos_by_task={}
+                for tid,url,name in attachment_rows:
+                    photos_by_task.setdefault(int(tid),[]).append((url,name))
+                lines=["<b>📋 ЕЖЕДНЕВНЫЙ ОТЧЁТ ToolSite</b>",f"📅 {now.strftime('%d.%m.%Y')}  ·  Итоги на 17:00", ""]
+                for uid,name in users:
+                    tasks=by_staff.get(int(uid),[])
+                    done=sum(1 for t in tasks if t["status"]=="done")
+                    lines.append(f"<b>👷 {html.escape(name)}</b>  <code>{done}/{len(tasks)}</code>")
+                    if not tasks:
+                        lines.append("   — Задач нет")
+                    for task in tasks:
+                        icon="✅" if task["status"]=="done" else "🟡"
+                        status_text="Выполнена" if task["status"]=="done" else "В работе / не завершена"
+                        lines.append(f"   {icon} {html.escape(task['title'])} — {status_text}")
+                        if task["description"]:
+                            lines.append(f"      <i>{html.escape(task['description'][:180])}</i>")
+                    lines.append("")
+                total=sum(len(v) for v in by_staff.values())
+                completed=sum(1 for v in by_staff.values() for t in v if t["status"]=="done")
+                lines.append(f"<b>ИТОГО:</b> {completed} из {total} задач выполнено.")
+                report_text="\n".join(lines)
+                recipients={int(x[0]) for x in groups}
+                recipients.update(int(x[0]) for x in admins)
+                for chat_id in sorted(recipients-delivered):
+                    try:
+                        await bot.send_message(chat_id,report_text,parse_mode="HTML",disable_web_page_preview=True)
+                        for uid,name in users:
+                            for task in by_staff.get(int(uid),[]):
+                                attachments=photos_by_task.get(task["id"],[])
+                                if not attachments: continue
+                                media=[]
+                                for url,filename in attachments[:5]:
+                                    safe_name=Path(str(url).split("?",1)[0]).name
+                                    if not safe_name or safe_name in {".",".."}: continue
+                                    path=Path(os.getenv("TASK_UPLOAD_DIR","/data/task_uploads"))/safe_name
+                                    if path.is_file():
+                                        caption=f"{name} · {task['title']}" if not media else None
+                                        media.append(InputMediaPhoto(media=FSInputFile(str(path)),caption=caption))
+                                if len(media)==1:
+                                    await bot.send_photo(chat_id,media[0].media,caption=media[0].caption)
+                                elif media:
+                                    await bot.send_media_group(chat_id,media)
+                        with db_connect() as c:
+                            c.execute("INSERT OR REPLACE INTO daily_task_report_deliveries (report_date,chat_id,sent_at) VALUES (?,?,?)",(report_date,chat_id,now.isoformat(timespec="seconds")))
+                    except Exception as exc:
+                        print(f"Daily task report delivery failed for {chat_id}: {exc}")
+            await asyncio.sleep(30)
+        except Exception as exc:
+            print(f"Daily task report loop error: {exc}")
+            await asyncio.sleep(30)
+
+
 async def location_request_loop(bot):
     tz = ZoneInfo("Europe/Moscow")
     keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📍 Отправить геопозицию", request_location=True)]], resize_keyboard=True, one_time_keyboard=True)
@@ -1542,11 +1631,13 @@ async def main():
     runner = await run_web_server(bot)
     reminder_task = asyncio.create_task(reminder_loop(bot))
     location_task = asyncio.create_task(location_request_loop(bot))
+    task_report_task = asyncio.create_task(daily_task_report_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
         location_task.cancel()
+        task_report_task.cancel()
         await runner.cleanup()
         await bot.session.close()
 
