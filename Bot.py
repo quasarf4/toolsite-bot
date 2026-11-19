@@ -72,10 +72,10 @@ def db_connect():
         "Мансур", "Амир", "Ваня", "Эмом", "Хусейн", "Дилшод",
         "Мирали", "Мирзоали", "Машраб", "Бахтиёр", "Хочи", "Хасан",
     ]
-    conn.executemany(
-        "INSERT OR IGNORE INTO users (telegram_id, name, created_at) VALUES (?, ?, ?)",
-        [(-10001 - i, name, now_text()) for i, name in enumerate(preset_staff)]
-    )
+    for i, name in enumerate(preset_staff):
+        exists = conn.execute("SELECT 1 FROM users WHERE name=? COLLATE NOCASE LIMIT 1", (name,)).fetchone()
+        if not exists:
+            conn.execute("INSERT INTO users (telegram_id, name, created_at) VALUES (?, ?, ?)", (-10001 - i, name, now_text()))
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS staff_invites (
@@ -346,6 +346,60 @@ async def rotate_staff_invite(message: Message):
     link = f"https://t.me/{bot_info.username}?start={token}"
     await message.answer(
         f"🔐 Новая ссылка для {staff_name}:\n{link}\n\nПредыдущая ссылка больше не действует.",
+        disable_web_page_preview=True
+    )
+
+
+@dp.message(Command("resetstaff"), F.chat.type == "private")
+async def reset_staff_account(message: Message):
+    if not is_admin_user(message.from_user.id):
+        await message.answer("❌ Сбросить аккаунт может только администратор.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or " ".join(parts[1].split()).casefold() != "эмом":
+        await message.answer("Укажи сотрудника: /resetstaff Эмом")
+        return
+
+    staff_name = "Эмом"
+    with db_connect() as c:
+        old_ids = [row[0] for row in c.execute(
+            "SELECT telegram_id FROM users WHERE name=? COLLATE NOCASE", (staff_name,)
+        ).fetchall()]
+        if not old_ids:
+            await message.answer("❌ Запись Эмом не найдена.")
+            return
+
+        # Remove every old identity and its account-specific data.
+        for old_id in old_ids:
+            c.execute("UPDATE tools SET status='free',holder_id=NULL,holder_name=NULL,floor=NULL WHERE holder_id=?", (old_id,))
+            for table, column in (
+                ("staff_tasks", "staff_id"), ("staff_locations", "telegram_id"),
+                ("location_daily_requests", "request_date"),
+                ("transfer_requests", "sender_id"), ("transfer_requests", "recipient_id"),
+                ("consumable_requests", "requested_by"), ("site_notes", "created_by"),
+                ("chat_messages", "user_id"), ("journal", "user_id"),
+                ("inventory_sessions", "created_by"),
+            ):
+                if table == "location_daily_requests":
+                    continue
+                try:
+                    c.execute(f"DELETE FROM {table} WHERE {column}=?", (old_id,))
+                except sqlite3.OperationalError:
+                    pass
+            c.execute("DELETE FROM staff_invites WHERE staff_id=? OR claimed_by=?", (old_id, old_id))
+            c.execute("DELETE FROM users WHERE telegram_id=?", (old_id,))
+
+        new_id = min([row[0] for row in c.execute("SELECT telegram_id FROM users WHERE telegram_id<0").fetchall()] or [-10000]) - 1
+        c.execute("INSERT INTO users (telegram_id,name,created_at,username) VALUES (?,?,?,NULL)", (new_id, staff_name, now_text()))
+        token = secrets.token_urlsafe(24)
+        c.execute("INSERT INTO staff_invites (staff_id,token,created_at) VALUES (?,?,?)", (new_id, token, now_text()))
+
+    bot_info = await message.bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={token}"
+    await message.answer(
+        f"✅ Старый аккаунт Эмом сброшен. Старая ссылка аннулирована.\n"
+        f"Создана новая запись сотрудника и новое приглашение:\n{link}\n\n"
+        f"Отправь эту ссылку Эмому. Старые данные его аккаунта удалены, инструменты, числившиеся за ним, возвращены на склад.",
         disable_web_page_preview=True
     )
 
