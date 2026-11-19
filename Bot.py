@@ -1461,11 +1461,43 @@ async def api_register(request):
         user=c.execute("SELECT name FROM users WHERE telegram_id=?",(uid,)).fetchone()
         if not user:
             return web.json_response({"error":"Вход доступен только по персональной ссылке-приглашению администратора"},status=403)
-        if user[0] != name and not is_admin_user(uid):
-            return web.json_response({"error":"Имя закреплено за приглашением. Для изменения обратись к администратору."},status=403)
         if user[0] != name:
-            c.execute("UPDATE users SET name=? WHERE telegram_id=?",(name,uid))
+            return web.json_response({"error":"Менять имя может только администрация. Обратись к администратору."},status=403)
     return web.json_response({"ok":True})
+
+async def api_staff_rename(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid):
+        return web.json_response({"error":"Менять имена сотрудников могут только администраторы"},status=403)
+    data=await request.json()
+    try: staff_id=int(data.get("staff_id"))
+    except (TypeError,ValueError): return web.json_response({"error":"Сотрудник не выбран"},status=400)
+    name=" ".join(str(data.get("name","")).strip().split())[:60]
+    if len(name)<2: return web.json_response({"error":"Укажи имя и фамилию"},status=400)
+    with db_connect() as c:
+        exists=c.execute("SELECT 1 FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
+        if not exists: return web.json_response({"error":"Сотрудник не найден"},status=404)
+        c.execute("UPDATE users SET name=? WHERE telegram_id=?",(name,staff_id))
+    return web.json_response({"ok":True,"name":name})
+
+async def api_chat_delete(request):
+    uid=int(request["tg_user"]["id"])
+    data=await request.json()
+    try: message_id=int(data.get("message_id"))
+    except (TypeError,ValueError): return web.json_response({"error":"Сообщение не выбрано"},status=400)
+    with db_connect() as c:
+        row=c.execute("SELECT user_id,attachment_url FROM chat_messages WHERE id=?",(message_id,)).fetchone()
+        if not row: return web.json_response({"error":"Сообщение уже удалено или не найдено"},status=404)
+        owner_id, attachment_url=row
+        if owner_id!=uid and not is_admin_user(uid):
+            return web.json_response({"error":"Можно удалять только свои сообщения"},status=403)
+        c.execute("DELETE FROM chat_messages WHERE id=?",(message_id,))
+    if attachment_url and attachment_url.startswith("/chat-files/"):
+        filename=attachment_url[len("/chat-files/"):]
+        if filename and Path(filename).name==filename:
+            try: (Path(os.getenv("CHAT_UPLOAD_DIR","/data/chat_uploads"))/filename).unlink(missing_ok=True)
+            except OSError as exc: print(f"Chat attachment cleanup failed: {exc}")
+    return web.json_response({"ok":True,"deleted_id":message_id})
 
 async def api_add_consumable(request):
     uid=int(request["tg_user"]["id"])
@@ -1621,7 +1653,7 @@ async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth], client_max_size=9 * 1024 * 1024); app["bot"]=bot
     app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/task-files/{filename}",app_task_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_post("/api/tasks/create",api_task_create); app.router.add_post("/api/tasks/complete",api_task_complete); app.router.add_post("/api/tasks/upload",api_task_upload); app.router.add_post("/api/tasks/delete",api_task_delete); app.router.add_get("/api/inventory",api_inventory_summary)
     app.router.add_post("/api/consumables",api_add_consumable); app.router.add_post("/api/consumables/update",api_update_consumable); app.router.add_post("/api/consumables/request",api_request_consumable); app.router.add_post("/api/consumables/respond",api_respond_consumable_request)
-    app.router.add_post("/api/register",api_register); app.router.add_post("/api/chat/upload",api_chat_upload); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
+    app.router.add_post("/api/register",api_register); app.router.add_post("/api/staff/rename",api_staff_rename); app.router.add_post("/api/chat/delete",api_chat_delete); app.router.add_post("/api/chat/upload",api_chat_upload); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/site-notes",api_site_note_add); app.router.add_post("/api/site-notes/resolve",api_site_note_resolve); app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
     runner=web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner,"0.0.0.0",int(os.getenv("PORT","8080"))).start()
