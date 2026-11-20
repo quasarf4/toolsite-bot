@@ -597,17 +597,26 @@ async def cancel_action(message: Message):
 
 
 @dp.message(F.location, F.chat.type == "private")
+@dp.edited_message(F.location, F.chat.type == "private")
 async def receive_staff_location(message: Message):
     uid = message.from_user.id
     user = get_user(uid)
     if not user:
-        await message.answer("Сначала зарегистрируйся в ToolSite, чтобы привязать геопозицию к своему имени.")
+        if not message.edit_date:
+            await message.answer("Сначала зарегистрируйся в ToolSite, чтобы привязать геопозицию к своему имени.")
         return
     loc = message.location
     local_now = datetime.now(ZoneInfo("Europe/Moscow"))
     with db_connect() as c:
         c.execute("""INSERT INTO staff_locations (telegram_id,latitude,longitude,accuracy,updated_at,report_date) VALUES (?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET latitude=excluded.latitude,longitude=excluded.longitude,accuracy=excluded.accuracy,updated_at=excluded.updated_at,report_date=excluded.report_date""",(uid,loc.latitude,loc.longitude,loc.horizontal_accuracy,local_now.isoformat(timespec="seconds"),local_now.date().isoformat()))
-    await message.answer("✅ Геопозиция получена и сохранена для карты ToolSite. Это разовая отметка, а не непрерывное отслеживание.", reply_markup=ReplyKeyboardRemove())
+    # Telegram sends subsequent live-location positions as edited_message updates.
+    # Save those silently so the map follows the employee without spamming the chat.
+    if message.edit_date:
+        return
+    if loc.live_period:
+        await message.answer("🟢 Трансляция геопозиции принята! ToolSite будет обновлять твою точку на карте, пока Telegram передаёт координаты.")
+    else:
+        await message.answer("📍 Получена разовая отметка. Чтобы точка двигалась на карте, отправь именно трансляцию: 📎 → Геопозиция → «Транслировать геопозицию» и выбери время.")
 @dp.message(F.text)
 async def receive_text(message: Message):
     user_id = message.from_user.id
@@ -1773,7 +1782,6 @@ async def daily_task_report_loop(bot):
 
 async def location_request_loop(bot):
     tz = ZoneInfo("Europe/Moscow")
-    keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📍 Отправить геопозицию", request_location=True)]], resize_keyboard=True, one_time_keyboard=True)
     while True:
         try:
             now = datetime.now(tz)
@@ -1792,8 +1800,8 @@ async def location_request_loop(bot):
                     targets = []; followup = False
             for telegram_id,name in targets:
                 try:
-                    text = ("🔔 Напоминание: геопозиция на сегодня ещё не получена. Нажми кнопку ниже и отправь своё местоположение на объекте." if followup else "Доброе утро! 📍 Отправь геопозицию, чтобы отметить своё местоположение на объекте. Нажми кнопку ниже и подтверди отправку.")
-                    await bot.send_message(telegram_id,text,reply_markup=keyboard)
+                    text = ("🔔 Напоминание: трансляция геопозиции ещё не включена. Открой 📎 → Геопозиция → «Транслировать геопозицию» и выбери время." if followup else "Доброе утро! 📍 Чтобы сотрудники видели друг друга на карте ToolSite в реальном времени, отправь трансляцию геопозиции: нажми 📎 → Геопозиция → «Транслировать геопозицию» → выбери время. Обычная отправка геопозиции даёт только одну точку.")
+                    await bot.send_message(telegram_id,text)
                 except Exception as exc: print(f"Location request failed for {telegram_id} ({name}): {exc}")
         except Exception as exc: print(f"Location request loop error: {exc}")
         await asyncio.sleep(30)
