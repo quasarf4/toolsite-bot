@@ -54,6 +54,18 @@ def db_connect():
     user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "username" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+    if "skill_level" not in user_columns:
+        conn.execute("ALTER TABLE users ADD COLUMN skill_level TEXT NOT NULL DEFAULT 'beginner'")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS main_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            due_date TEXT,
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS staff_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +79,11 @@ def db_connect():
             completed_at TEXT
         )
     """)
+    task_columns = {row[1] for row in conn.execute("PRAGMA table_info(staff_tasks)").fetchall()}
+    if "main_task_id" not in task_columns:
+        conn.execute("ALTER TABLE staff_tasks ADD COLUMN main_task_id INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staff_tasks_staff ON staff_tasks(staff_id, status, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staff_tasks_main ON staff_tasks(main_task_id, status)")
     conn.execute("""CREATE TABLE IF NOT EXISTS task_attachments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id INTEGER NOT NULL,
@@ -1078,7 +1094,11 @@ async def api_state(request):
             c.execute("UPDATE users SET username=? WHERE telegram_id=?",(username,uid))
         user=c.execute("SELECT name FROM users WHERE telegram_id=?",(uid,)).fetchone()
         tools=c.execute("SELECT id,name,status,holder_id,holder_name,floor,due_at FROM tools ORDER BY name COLLATE NOCASE").fetchall()
-        staff=c.execute("SELECT telegram_id,name,username FROM users ORDER BY name COLLATE NOCASE").fetchall()
+        staff=c.execute("SELECT telegram_id,name,username,skill_level FROM users ORDER BY name COLLATE NOCASE").fetchall()
+        main_task_rows=c.execute("""SELECT m.id,m.title,m.description,m.due_date,m.created_at,
+            COUNT(t.id),SUM(CASE WHEN t.status='done' THEN 1 ELSE 0 END)
+            FROM main_tasks m LEFT JOIN staff_tasks t ON t.main_task_id=m.id
+            GROUP BY m.id ORDER BY m.id DESC""").fetchall()
         journal=c.execute("SELECT tool_name,action,user_name,floor,created_at FROM journal ORDER BY id DESC LIMIT 50").fetchall()
         incoming=c.execute("SELECT id,tool_id,tool_name,sender_id,sender_name,created_at FROM transfer_requests WHERE recipient_id=? AND status='pending' ORDER BY id DESC",(uid,)).fetchall()
         consumables=c.execute("SELECT id,name,unit,quantity,min_quantity,updated_at FROM consumables ORDER BY name COLLATE NOCASE").fetchall()
@@ -1088,12 +1108,12 @@ async def api_state(request):
             consumable_requests=c.execute("SELECT id,consumable_id,consumable_name,quantity,note,requested_by_name,status,created_at FROM consumable_requests WHERE requested_by=? ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
         locations=c.execute("SELECT l.telegram_id,u.name,l.latitude,l.longitude,l.accuracy,l.updated_at,u.username FROM staff_locations l JOIN users u ON u.telegram_id=l.telegram_id ORDER BY l.updated_at DESC").fetchall()
         site_notes=c.execute("SELECT id,area,note,created_by_name,status,created_at,resolved_by,resolved_at FROM site_notes ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,id DESC LIMIT 100").fetchall()
-        task_rows=c.execute("SELECT t.id,t.staff_id,u.name,t.title,t.description,t.due_date,t.status,t.created_at,t.completed_at FROM staff_tasks t JOIN users u ON u.telegram_id=t.staff_id "+("ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC" if admin else "WHERE t.staff_id=? ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC"),(() if admin else (uid,))).fetchall()
+        task_rows=c.execute("SELECT t.id,t.staff_id,u.name,t.title,t.description,t.due_date,t.status,t.created_at,t.completed_at,t.main_task_id FROM staff_tasks t JOIN users u ON u.telegram_id=t.staff_id "+("ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC" if admin else "WHERE t.staff_id=? ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END,t.id DESC"),(() if admin else (uid,))).fetchall()
         task_attachments=c.execute("SELECT a.task_id,a.url,a.name,a.created_at FROM task_attachments a JOIN staff_tasks t ON t.id=a.task_id "+("" if admin else "WHERE t.staff_id=?")+" ORDER BY a.id",(() if admin else (uid,))).fetchall()
     attachments_by_task={}
     for a in task_attachments: attachments_by_task.setdefault(a[0],[]).append({"url":a[1],"name":a[2],"created_at":a[3]})
     total=len(tools); free=sum(1 for t in tools if t[2]=="free")
-    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(admin),"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1],"username":p[2]} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5],"username":r[6]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes],"tasks":[{"id":r[0],"staff_id":r[1],"staff_name":r[2],"title":r[3],"description":r[4],"due_date":r[5],"status":r[6],"created_at":r[7],"completed_at":r[8],"attachments":attachments_by_task.get(r[0],[])} for r in task_rows]})
+    return web.json_response({"profile":{"id":uid,"name":user[0] if user else ""},"is_admin":bool(admin),"main_tasks":[{"id":r[0],"title":r[1],"description":r[2],"due_date":r[3],"created_at":r[4],"total":r[5],"done":r[6] or 0} for r in main_task_rows],"stats":{"total":total,"free":free,"issued":total-free,"staff":len(staff)},"tools":[{"id":t[0],"name":t[1],"status":t[2],"holder_id":t[3],"holder":t[4],"floor":t[5],"due_at":t[6]} for t in tools],"staff":[{"id":p[0],"name":p[1],"username":p[2],"skill_level":p[3] or "beginner"} for p in staff],"journal":[{"tool":j[0],"action":j[1],"user":j[2],"floor":j[3],"time":j[4]} for j in journal],"my_tools":[t[0] for t in tools if t[3]==uid],"incoming_transfers":[{"id":r[0],"tool_id":r[1],"tool":r[2],"sender_id":r[3],"sender":r[4],"created_at":r[5]} for r in incoming],"consumables":[{"id":r[0],"name":r[1],"unit":r[2],"quantity":r[3],"min_quantity":r[4],"updated_at":r[5]} for r in consumables],"consumable_requests":[{"id":r[0],"consumable_id":r[1],"name":r[2],"quantity":r[3],"note":r[4],"requested_by":r[5],"status":r[6],"created_at":r[7]} for r in consumable_requests], "locations":[{"staff_id":r[0],"name":r[1],"latitude":r[2],"longitude":r[3],"accuracy":r[4],"updated_at":r[5],"username":r[6]} for r in locations],"site_notes":[{"id":r[0],"area":r[1],"note":r[2],"created_by":r[3],"status":r[4],"created_at":r[5],"resolved_by":r[6],"resolved_at":r[7]} for r in site_notes],"tasks":[{"id":r[0],"staff_id":r[1],"staff_name":r[2],"title":r[3],"description":r[4],"due_date":r[5],"status":r[6],"created_at":r[7],"completed_at":r[8],"main_task_id":r[9],"attachments":attachments_by_task.get(r[0],[])} for r in task_rows]})
 
 async def api_site_note_add(request):
     uid=int(request["tg_user"]["id"])
@@ -1269,7 +1289,7 @@ async def api_staff_history(request):
     # Все зарегистрированные сотрудники могут просматривать карточки коллег.
     # Изменять задачи и выполнять административные действия по-прежнему могут только администраторы.
     with db_connect() as c:
-        person=c.execute("SELECT telegram_id,name,username FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
+        person=c.execute("SELECT telegram_id,name,username,skill_level FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
         if not person: return web.json_response({"error":"Сотрудник не найден"},status=404)
         rows=c.execute("SELECT tool_name,action,floor,created_at FROM journal WHERE user_id=? ORDER BY id DESC LIMIT 50",(staff_id,)).fetchall()
         assigned=c.execute("SELECT id,name,floor,due_at FROM tools WHERE holder_id=? AND status='issued' ORDER BY name COLLATE NOCASE",(staff_id,)).fetchall()
@@ -1277,11 +1297,45 @@ async def api_staff_history(request):
         attachments=c.execute("SELECT task_id,url,name,created_at FROM task_attachments WHERE task_id IN (SELECT id FROM staff_tasks WHERE staff_id=?) ORDER BY id",(staff_id,)).fetchall()
     attachments_by_task={}
     for a in attachments: attachments_by_task.setdefault(a[0],[]).append({"url":a[1],"name":a[2],"created_at":a[3]})
-    return web.json_response({"staff":{"id":person[0],"name":person[1],"username":person[2]},
+    return web.json_response({"staff":{"id":person[0],"name":person[1],"username":person[2],"skill_level":person[3] or "beginner"},
         "tools":[{"id":r[0],"name":r[1],"floor":r[2],"due_at":r[3]} for r in assigned],
         "tasks":[{"id":r[0],"title":r[1],"description":r[2],"due_date":r[3],"status":r[4],"created_at":r[5],"completed_at":r[6],"attachments":attachments_by_task.get(r[0],[])} for r in tasks],
         "history":[{"tool":r[0],"action":r[1],"floor":r[2],"time":r[3]} for r in rows]})
 
+
+
+async def api_main_task_create(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid):
+        return web.json_response({"error":"Создавать главные задачи могут только администраторы"},status=403)
+    data=await request.json()
+    title=str(data.get("title","")).strip()[:120]
+    description=str(data.get("description","")).strip()[:1000]
+    due_date=str(data.get("due_date","")).strip()[:10] or None
+    if len(title)<2:
+        return web.json_response({"error":"Название главной задачи должно быть не короче 2 символов"},status=400)
+    if due_date and (len(due_date)!=10 or due_date[4:5]!="-" or due_date[7:8]!="-"):
+        return web.json_response({"error":"Проверь срок выполнения"},status=400)
+    with db_connect() as c:
+        cur=c.execute("INSERT INTO main_tasks (title,description,due_date,created_by,created_at) VALUES (?,?,?,?,?)",(title,description,due_date,uid,now_text()))
+        task_id=cur.lastrowid
+    return web.json_response({"ok":True,"id":task_id})
+
+async def api_staff_skill(request):
+    uid=int(request["tg_user"]["id"])
+    if not is_admin_user(uid):
+        return web.json_response({"error":"Менять уровень сотрудников могут только администраторы"},status=403)
+    data=await request.json()
+    try: staff_id=int(data.get("staff_id"))
+    except (TypeError,ValueError): return web.json_response({"error":"Сотрудник не выбран"},status=400)
+    level=str(data.get("skill_level","")).strip().lower()
+    if level not in {"beginner","intermediate","master"}:
+        return web.json_response({"error":"Некорректный уровень профессионализма"},status=400)
+    with db_connect() as c:
+        changed=c.execute("UPDATE users SET skill_level=? WHERE telegram_id=?",(level,staff_id)).rowcount
+    if not changed:
+        return web.json_response({"error":"Сотрудник не найден"},status=404)
+    return web.json_response({"ok":True})
 
 async def api_task_create(request):
     uid=int(request["tg_user"]["id"])
@@ -1299,7 +1353,15 @@ async def api_task_create(request):
     with db_connect() as c:
         person=c.execute("SELECT name FROM users WHERE telegram_id=?",(staff_id,)).fetchone()
         if not person: return web.json_response({"error":"Сотрудник не найден"},status=404)
-        cur=c.execute("INSERT INTO staff_tasks (staff_id,title,description,due_date,status,created_by,created_at) VALUES (?,?,?,?,'open',?,?)",(staff_id,title,description,due_date,uid,now_text()))
+        main_task_id=data.get("main_task_id")
+        if main_task_id not in (None,"",0,"0"):
+            try: main_task_id=int(main_task_id)
+            except (TypeError,ValueError): return web.json_response({"error":"Главная задача не выбрана"},status=400)
+            if not c.execute("SELECT 1 FROM main_tasks WHERE id=?",(main_task_id,)).fetchone():
+                return web.json_response({"error":"Главная задача не найдена"},status=404)
+        else:
+            main_task_id=None
+        cur=c.execute("INSERT INTO staff_tasks (staff_id,title,description,due_date,status,created_by,created_at,main_task_id) VALUES (?,?,?,?,'open',?,?,?)",(staff_id,title,description,due_date,uid,now_text(),main_task_id))
         task_id=cur.lastrowid
     return web.json_response({"ok":True,"id":task_id,"staff_name":person[0]})
 
@@ -1660,7 +1722,7 @@ async def api_transfer(request):
 
 async def run_web_server(bot):
     app=web.Application(middlewares=[api_auth], client_max_size=9 * 1024 * 1024); app["bot"]=bot
-    app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/task-files/{filename}",app_task_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_post("/api/tasks/create",api_task_create); app.router.add_post("/api/tasks/complete",api_task_complete); app.router.add_post("/api/tasks/upload",api_task_upload); app.router.add_post("/api/tasks/delete",api_task_delete); app.router.add_get("/api/inventory",api_inventory_summary)
+    app.router.add_get("/",app_index); app.router.add_get("/chat-files/{filename}",app_chat_file); app.router.add_get("/task-files/{filename}",app_task_file); app.router.add_get("/map.png",app_map_image); app.router.add_get("/api/state",api_state); app.router.add_get("/api/chat",api_chat_messages); app.router.add_get("/api/tools/{tool_id}/history",api_tool_history); app.router.add_get("/api/staff/{staff_id}/history",api_staff_history); app.router.add_post("/api/main-tasks/create",api_main_task_create); app.router.add_post("/api/staff/skill",api_staff_skill); app.router.add_post("/api/tasks/create",api_task_create); app.router.add_post("/api/tasks/complete",api_task_complete); app.router.add_post("/api/tasks/upload",api_task_upload); app.router.add_post("/api/tasks/delete",api_task_delete); app.router.add_get("/api/inventory",api_inventory_summary)
     app.router.add_post("/api/consumables",api_add_consumable); app.router.add_post("/api/consumables/update",api_update_consumable); app.router.add_post("/api/consumables/request",api_request_consumable); app.router.add_post("/api/consumables/respond",api_respond_consumable_request)
     app.router.add_post("/api/register",api_register); app.router.add_post("/api/staff/rename",api_staff_rename); app.router.add_post("/api/chat/delete",api_chat_delete); app.router.add_post("/api/chat/upload",api_chat_upload); app.router.add_post("/api/chat",api_chat_send); app.router.add_post("/api/tools",api_add_tool); app.router.add_post("/api/delete-tool",api_delete_tool)
     app.router.add_post("/api/site-notes",api_site_note_add); app.router.add_post("/api/site-notes/resolve",api_site_note_resolve); app.router.add_post("/api/issue",api_issue); app.router.add_post("/api/return",api_return); app.router.add_post("/api/transfer",api_transfer); app.router.add_post("/api/transfer/respond",api_transfer_respond); app.router.add_post("/api/inventory/check",api_inventory_check)
