@@ -8,7 +8,7 @@ import html
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from aiohttp import web
 
@@ -1174,8 +1174,8 @@ async def api_chat_send(request):
         recipients = [row[0] for row in c.execute("SELECT telegram_id FROM users WHERE telegram_id>0").fetchall()]
         groups = c.execute("SELECT chat_id FROM chat_notification_groups").fetchall()
     stamp = datetime.fromisoformat(created).astimezone().strftime("%H:%M")
-    body = message or "Отправлено вложение"
-    if attachment_name:
+    body = message or ("🎤 Голосовое сообщение" if attachment_type and attachment_type.startswith("audio/") else "Отправлено вложение")
+    if attachment_name and not (attachment_type and attachment_type.startswith("audio/")):
         body += f"\n📎 {attachment_name}"
     notice = f"💬 Новое сообщение в общем чате ToolSite\nОт: {user[0]}\nЧто: {body[:900]}\nВо сколько: {stamp}"
     bot = request.app["bot"]
@@ -1205,7 +1205,7 @@ async def api_chat_upload(request):
             return web.json_response({"error":"Файл не найден"}, status=400)
         original = Path(field.filename or "file").name
         content_type = (field.headers.get("Content-Type") or "application/octet-stream").lower()
-        allowed = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif","application/pdf":".pdf","text/plain":".txt","application/msword":".doc","application/vnd.openxmlformats-officedocument.wordprocessingml.document":".docx","application/vnd.ms-excel":".xls","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":".xlsx"}
+        allowed = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif","application/pdf":".pdf","text/plain":".txt","application/msword":".doc","application/vnd.openxmlformats-officedocument.wordprocessingml.document":".docx","application/vnd.ms-excel":".xls","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":".xlsx","audio/webm":".webm","audio/webm;codecs=opus":".webm","audio/ogg":".ogg","audio/ogg;codecs=opus":".ogg","application/ogg":".ogg","audio/mp4":".m4a","audio/mpeg":".mp3","audio/wav":".wav"}
         if content_type not in allowed:
             return web.json_response({"error":"Можно прикрепить фото, PDF, Word, Excel или TXT"}, status=415)
         folder = Path(os.getenv("CHAT_UPLOAD_DIR", "/data/chat_uploads"))
@@ -1805,6 +1805,40 @@ async def location_request_loop(bot):
                 except Exception as exc: print(f"Location request failed for {telegram_id} ({name}): {exc}")
         except Exception as exc: print(f"Location request loop error: {exc}")
         await asyncio.sleep(30)
+async def chat_cleanup_loop():
+    """Remove general-chat messages and their uploaded files after 36 hours."""
+    while True:
+        try:
+            cutoff = datetime.now().astimezone() - timedelta(hours=36)
+            folder = Path(os.getenv("CHAT_UPLOAD_DIR", "/data/chat_uploads"))
+            with db_connect() as c:
+                rows = c.execute("SELECT id,attachment_url,created_at FROM chat_messages").fetchall()
+                expired = []
+                for message_id, attachment_url, created_at in rows:
+                    try:
+                        created = datetime.fromisoformat(created_at)
+                        if created.tzinfo is None:
+                            created = created.astimezone()
+                        if created < cutoff:
+                            expired.append((message_id, attachment_url))
+                    except (TypeError, ValueError):
+                        continue
+                for message_id, attachment_url in expired:
+                    c.execute("DELETE FROM chat_messages WHERE id=?", (message_id,))
+                    if attachment_url and attachment_url.startswith("/chat-files/"):
+                        filename = attachment_url[len("/chat-files/"):]
+                        if filename and Path(filename).name == filename:
+                            try:
+                                (folder / filename).unlink(missing_ok=True)
+                            except OSError as exc:
+                                print(f"Expired chat file cleanup failed: {exc}")
+            if expired:
+                print(f"Chat cleanup removed {len(expired)} messages older than 36 hours")
+        except Exception as exc:
+            print(f"Chat cleanup loop error: {exc}")
+        await asyncio.sleep(3600)
+
+
 async def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -1817,12 +1851,14 @@ async def main():
     reminder_task = asyncio.create_task(reminder_loop(bot))
     location_task = asyncio.create_task(location_request_loop(bot))
     task_report_task = asyncio.create_task(daily_task_report_loop(bot))
+    chat_cleanup_task = asyncio.create_task(chat_cleanup_loop())
     try:
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
         location_task.cancel()
         task_report_task.cancel()
+        chat_cleanup_task.cancel()
         await runner.cleanup()
         await bot.session.close()
 
