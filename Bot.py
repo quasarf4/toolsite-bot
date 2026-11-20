@@ -1204,8 +1204,8 @@ async def api_chat_upload(request):
         if field is None or field.name != "file":
             return web.json_response({"error":"Файл не найден"}, status=400)
         original = Path(field.filename or "file").name
-        content_type = (field.headers.get("Content-Type") or "application/octet-stream").lower()
-        allowed = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif","application/pdf":".pdf","text/plain":".txt","application/msword":".doc","application/vnd.openxmlformats-officedocument.wordprocessingml.document":".docx","application/vnd.ms-excel":".xls","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":".xlsx","audio/webm":".webm","audio/webm;codecs=opus":".webm","audio/ogg":".ogg","audio/ogg;codecs=opus":".ogg","application/ogg":".ogg","audio/mp4":".m4a","audio/mpeg":".mp3","audio/wav":".wav"}
+        content_type = (field.headers.get("Content-Type") or "application/octet-stream").lower().split(";", 1)[0].strip()
+        allowed = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif","application/pdf":".pdf","text/plain":".txt","application/msword":".doc","application/vnd.openxmlformats-officedocument.wordprocessingml.document":".docx","application/vnd.ms-excel":".xls","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":".xlsx","audio/webm":".webm","audio/ogg":".ogg","application/ogg":".ogg","audio/mp4":".m4a","audio/mpeg":".mp3","audio/wav":".wav"}
         if content_type not in allowed:
             return web.json_response({"error":"Можно прикрепить фото, PDF, Word, Excel или TXT"}, status=415)
         folder = Path(os.getenv("CHAT_UPLOAD_DIR", "/data/chat_uploads"))
@@ -1836,7 +1836,7 @@ async def chat_cleanup_loop():
                 print(f"Chat cleanup removed {len(expired)} messages older than 36 hours")
         except Exception as exc:
             print(f"Chat cleanup loop error: {exc}")
-        await asyncio.sleep(3600)
+        await asyncio.sleep(300)
 
 
 async def main():
