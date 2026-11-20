@@ -173,6 +173,12 @@ def db_connect():
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS lunch_reminder_deliveries (
+            reminder_date TEXT PRIMARY KEY,
+            sent_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1842,6 +1848,43 @@ async def daily_task_report_loop(bot):
             await asyncio.sleep(30)
 
 
+
+async def lunch_reminder_loop(bot):
+    """Send the daily 10-minute lunch reminder at 12:50 Moscow time."""
+    tz = ZoneInfo("Europe/Moscow")
+    while True:
+        try:
+            now = datetime.now(tz)
+            today = now.date().isoformat()
+            if now.hour == 12 and now.minute == 50:
+                with db_connect() as c:
+                    already_sent = c.execute(
+                        "SELECT 1 FROM lunch_reminder_deliveries WHERE reminder_date=?",
+                        (today,)
+                    ).fetchone()
+                    if not already_sent:
+                        recipients = c.execute(
+                            "SELECT telegram_id FROM users WHERE telegram_id>0"
+                        ).fetchall()
+                        c.execute(
+                            "INSERT OR IGNORE INTO lunch_reminder_deliveries (reminder_date,sent_at) VALUES (?,?)",
+                            (today, now.isoformat(timespec="seconds"))
+                        )
+                    else:
+                        recipients = []
+                for (telegram_id,) in recipients:
+                    try:
+                        await bot.send_message(
+                            telegram_id,
+                            "🍽️ Через 10 минут обед! Завершайте текущие дела и готовьтесь к перерыву."
+                        )
+                    except Exception as exc:
+                        print(f"Lunch reminder failed for {telegram_id}: {exc}")
+        except Exception as exc:
+            print(f"Lunch reminder loop error: {exc}")
+        await asyncio.sleep(20)
+
+
 async def location_request_loop(bot):
     tz = ZoneInfo("Europe/Moscow")
     while True:
@@ -1912,6 +1955,7 @@ async def main():
     runner = await run_web_server(bot)
     reminder_task = asyncio.create_task(reminder_loop(bot))
     location_task = asyncio.create_task(location_request_loop(bot))
+    lunch_reminder_task = asyncio.create_task(lunch_reminder_loop(bot))
     task_report_task = asyncio.create_task(daily_task_report_loop(bot))
     chat_cleanup_task = asyncio.create_task(chat_cleanup_loop())
     try:
@@ -1919,6 +1963,7 @@ async def main():
     finally:
         reminder_task.cancel()
         location_task.cancel()
+        lunch_reminder_task.cancel()
         task_report_task.cancel()
         chat_cleanup_task.cancel()
         await runner.cleanup()
