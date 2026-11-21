@@ -603,11 +603,14 @@ async def start(message: Message):
                         pass
                 c.execute("UPDATE users SET telegram_id=? WHERE telegram_id=?", (uid, staff_id))
             c.execute("UPDATE staff_invites SET claimed_by=?,claimed_at=? WHERE staff_id=?", (uid, now_text(), staff_id))
+            c.execute("UPDATE users SET username=? WHERE telegram_id=?", (message.from_user.username, uid))
             linked = c.execute("SELECT name FROM users WHERE telegram_id=?", (uid,)).fetchone()
         await message.answer(f"✅ Аккаунт закреплён за сотрудником: {linked[0]}. Теперь открывай ToolSite через кнопку ниже.", reply_markup=main_menu())
         return
     user = get_user(uid)
     if user:
+        with db_connect() as c:
+            c.execute("UPDATE users SET username=? WHERE telegram_id=?", (message.from_user.username, uid))
         await message.answer("✅ Ты уже зарегистрирован в ToolSite.", reply_markup=main_menu())
     else:
         await message.answer("Для входа в ToolSite нужна персональная ссылка-приглашение. Попроси её у администратора.")
